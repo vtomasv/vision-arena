@@ -13,9 +13,100 @@ Herramienta para comparar LLMs visuales (modelos de lenguaje con capacidad de vi
 
 ## Instalación
 
+### Opción 1: Docker (Recomendado)
+
+La forma más sencilla de ejecutar Vision LLM Comparator es usando Docker.
+
+#### Requisitos Previos
+- [Docker](https://docs.docker.com/get-docker/) instalado
+- [Docker Compose](https://docs.docker.com/compose/install/) instalado
+
+#### Inicio Rápido con Docker
+
 ```bash
-# Clonar o copiar el proyecto
-cd vision-llm-comparator
+# Clonar el repositorio
+git clone https://github.com/vtomasv/vision-arena.git
+cd vision-arena
+
+# Construir y ejecutar
+docker compose up -d
+
+# Ver logs (opcional)
+docker compose logs -f
+```
+
+La aplicación estará disponible en **http://localhost:8000**
+
+#### Configuración con Variables de Entorno
+
+Puedes configurar las API keys mediante variables de entorno:
+
+```bash
+# Opción 1: Exportar variables antes de ejecutar
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+export GOOGLE_API_KEY="..."
+docker compose up -d
+
+# Opción 2: Crear archivo .env
+cat > .env << EOF
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+GOOGLE_API_KEY=...
+EOF
+docker compose up -d
+```
+
+#### Comandos Docker Útiles
+
+```bash
+# Iniciar en segundo plano
+docker compose up -d
+
+# Ver estado del contenedor
+docker compose ps
+
+# Ver logs en tiempo real
+docker compose logs -f
+
+# Detener la aplicación
+docker compose down
+
+# Reconstruir después de cambios
+docker compose build --no-cache
+docker compose up -d
+
+# Eliminar todo (incluyendo datos)
+docker compose down -v
+```
+
+#### Persistencia de Datos
+
+Los datos se almacenan en un volumen Docker llamado `vision_data`. Esto incluye:
+- Configuraciones de LLM
+- Definiciones de pipelines
+- Historial de ejecuciones
+- Imágenes subidas
+
+Para hacer backup de los datos:
+```bash
+# Crear backup
+docker run --rm -v vision-arena_vision_data:/data -v $(pwd):/backup alpine tar czf /backup/vision-data-backup.tar.gz -C /data .
+
+# Restaurar backup
+docker run --rm -v vision-arena_vision_data:/data -v $(pwd):/backup alpine tar xzf /backup/vision-data-backup.tar.gz -C /data
+```
+
+### Opción 2: Instalación Local (Python)
+
+```bash
+# Clonar el repositorio
+git clone https://github.com/vtomasv/vision-arena.git
+cd vision-arena
+
+# Crear entorno virtual (opcional pero recomendado)
+python -m venv venv
+source venv/bin/activate  # En Windows: venv\Scripts\activate
 
 # Instalar dependencias
 pip install -r requirements.txt
@@ -29,12 +120,14 @@ La aplicación estará disponible en `http://localhost:8000`
 ## Estructura del Proyecto
 
 ```
-vision-llm-comparator/
+vision-arena/
 ├── app.py              # Aplicación FastAPI con UI
 ├── llm_providers.py    # Proveedores de LLM (OpenAI, Anthropic, etc.)
 ├── pipeline.py         # Sistema de pipelines y comparación
 ├── storage.py          # Persistencia de datos
 ├── requirements.txt    # Dependencias Python
+├── Dockerfile          # Imagen Docker
+├── docker-compose.yml  # Configuración Docker Compose
 └── README.md           # Esta documentación
 ```
 
@@ -217,6 +310,10 @@ asyncio.run(main())
 
 ## Almacenamiento
 
+### Con Docker
+Los datos se almacenan en el volumen `vision_data` montado en `/data` dentro del contenedor.
+
+### Instalación Local
 Los datos se guardan en `~/.vision_llm_comparator/`:
 - `configs/` - Configuraciones de LLM
 - `pipelines/` - Definiciones de pipelines
@@ -234,6 +331,45 @@ La aplicación estima costos basándose en precios públicos de los proveedores:
 | claude-3-5-sonnet | $3.00 | $15.00 |
 | claude-3-haiku | $0.25 | $1.25 |
 | Ollama (local) | $0.00 | $0.00 |
+
+## Solución de Problemas
+
+### Docker
+
+**El contenedor no inicia:**
+```bash
+# Ver logs detallados
+docker compose logs vision-llm-comparator
+
+# Verificar que el puerto 8000 no está en uso
+lsof -i :8000
+```
+
+**Problemas de permisos con volúmenes:**
+```bash
+# En Linux, puede ser necesario ajustar permisos
+sudo chown -R 1000:1000 /var/lib/docker/volumes/vision-arena_vision_data
+```
+
+**Reconstruir imagen después de cambios:**
+```bash
+docker compose build --no-cache
+docker compose up -d
+```
+
+### Instalación Local
+
+**Error de dependencias:**
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt --force-reinstall
+```
+
+**Puerto en uso:**
+```bash
+# Cambiar el puerto en app.py o usar variable de entorno
+PORT=8080 python app.py
+```
 
 ## Licencia
 
