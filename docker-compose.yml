@@ -1,0 +1,29 @@
+services:
+  vision-llm-comparator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vision-llm-comparator
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persistir datos (configuraciones, pipelines, historial, imágenes)
+      - vision_data:/data
+    environment:
+      # Variables de entorno opcionales para API keys (pueden configurarse aquí o en la UI)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      # Directorio de datos
+      - VISION_LLM_DATA_DIR=/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/statistics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  vision_data:
+    driver: local
