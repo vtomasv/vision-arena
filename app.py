@@ -795,9 +795,21 @@ HTML_TEMPLATE = """
                                     </label>
                                 </div>
                                 
-                                <button class="button is-primary is-fullwidth" id="btn-upload-batch">
+                                <!-- Preview de archivos seleccionados -->
+                                <div id="batch-preview" class="mb-3" style="display:none;">
+                                    <label class="label">Archivos a subir:</label>
+                                    <div id="batch-preview-list" style="max-height: 150px; overflow-y: auto;"></div>
+                                </div>
+                                
+                                <button class="button is-primary is-fullwidth mb-2" id="btn-upload-batch">
                                     <i class="fas fa-cloud-upload-alt mr-2"></i>Subir Batch
                                 </button>
+                                
+                                <!-- Progreso de subida -->
+                                <div id="batch-upload-progress" class="mb-3" style="display:none;">
+                                    <progress class="progress is-primary" id="batch-progress-bar" max="100">0%</progress>
+                                    <p class="has-text-centered is-size-7" id="batch-progress-text">Subiendo...</p>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -822,24 +834,57 @@ HTML_TEMPLATE = """
                             </p>
                         </header>
                         <div class="card-content">
-                            <div class="field">
-                                <label class="label">Imagen Seleccionada</label>
-                                <div class="control">
-                                    <input class="input" type="text" id="selected-image" readonly placeholder="Selecciona una imagen">
+                            <!-- Tabs para modo individual o batch -->
+                            <div class="tabs is-small is-toggle mb-4">
+                                <ul>
+                                    <li class="is-active" data-exec-tab="single">
+                                        <a href="javascript:void(0)">Imagen Individual</a>
+                                    </li>
+                                    <li data-exec-tab="batch">
+                                        <a href="javascript:void(0)">Batch (Múltiples)</a>
+                                    </li>
+                                </ul>
+                            </div>
+                            
+                            <!-- Modo Individual -->
+                            <div id="exec-single" class="exec-tab-content">
+                                <div class="field">
+                                    <label class="label">Imagen Seleccionada</label>
+                                    <div class="control">
+                                        <input class="input" type="text" id="selected-image" readonly placeholder="Selecciona una imagen de la lista">
+                                    </div>
+                                </div>
+                                
+                                <div id="selected-image-preview" class="mb-4" style="display:none;">
+                                    <img id="preview-img" class="image-preview">
+                                </div>
+                                
+                                <div id="selected-context-preview" class="mb-4" style="display:none;">
+                                    <label class="label">Contexto Asociado</label>
+                                    <pre class="context-preview" id="context-preview-content"></pre>
                                 </div>
                             </div>
                             
-                            <div id="selected-image-preview" class="mb-4" style="display:none;">
-                                <img id="preview-img" class="image-preview">
-                            </div>
-                            
-                            <div id="selected-context-preview" class="mb-4" style="display:none;">
-                                <label class="label">Contexto Asociado</label>
-                                <pre class="context-preview" id="context-preview-content"></pre>
+                            <!-- Modo Batch -->
+                            <div id="exec-batch" class="exec-tab-content" style="display:none;">
+                                <div class="notification is-info is-light mb-3">
+                                    <p class="is-size-7"><strong>Modo Batch:</strong> Selecciona múltiples imágenes de la lista para procesarlas con un pipeline.</p>
+                                </div>
+                                
+                                <div class="field">
+                                    <label class="label">Imágenes Seleccionadas (<span id="batch-count">0</span>)</label>
+                                    <div id="batch-images-list" style="max-height: 150px; overflow-y: auto;">
+                                        <p class="has-text-grey is-size-7">Haz click en las imágenes de la lista para agregarlas</p>
+                                    </div>
+                                </div>
+                                
+                                <button class="button is-small is-warning mb-3" id="btn-clear-batch">
+                                    <i class="fas fa-times mr-1"></i>Limpiar Selección
+                                </button>
                             </div>
                             
                             <div class="field">
-                                <label class="label">Pipelines a Ejecutar</label>
+                                <label class="label">Pipeline a Ejecutar</label>
                                 <div id="pipeline-checkboxes"></div>
                             </div>
                             
@@ -847,7 +892,7 @@ HTML_TEMPLATE = """
                                 <i class="fas fa-rocket mr-2"></i>Ejecutar Comparación
                             </button>
                             
-                            <button class="button is-info is-fullwidth mt-2" id="btn-execute-batch" style="display:none;">
+                            <button class="button is-info is-fullwidth is-medium mt-2" id="btn-execute-batch" style="display:none;">
                                 <i class="fas fa-layer-group mr-2"></i>Ejecutar Batch
                             </button>
                         </div>
@@ -1122,6 +1167,9 @@ HTML_TEMPLATE = """
         let selectedImageContext = null;
         let pipelineSteps = [];
         let editingPipelineId = null;
+        let execMode = 'single'; // 'single' o 'batch'
+        let batchSelectedImages = []; // Imágenes seleccionadas para batch
+        let allImagesData = []; // Cache de todas las imágenes
 
         // ==================== Tab Navigation ====================
         document.querySelectorAll('.tabs.is-boxed li[data-tab]').forEach(tab => {
@@ -1154,6 +1202,35 @@ HTML_TEMPLATE = """
                 document.getElementById('upload-single').style.display = tabId === 'single' ? 'block' : 'none';
                 document.getElementById('upload-batch').style.display = tabId === 'batch' ? 'block' : 'none';
             });
+        });
+        
+        // Execution mode tab switching (single/batch)
+        document.querySelectorAll('[data-exec-tab]').forEach(tab => {
+            tab.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const tabId = tab.dataset.execTab;
+                execMode = tabId;
+                
+                document.querySelectorAll('[data-exec-tab]').forEach(t => t.classList.remove('is-active'));
+                tab.classList.add('is-active');
+                document.getElementById('exec-single').style.display = tabId === 'single' ? 'block' : 'none';
+                document.getElementById('exec-batch').style.display = tabId === 'batch' ? 'block' : 'none';
+                
+                // Mostrar/ocultar botones según modo
+                document.getElementById('btn-execute').style.display = tabId === 'single' ? 'block' : 'none';
+                document.getElementById('btn-execute-batch').style.display = tabId === 'batch' ? 'block' : 'none';
+                
+                // Actualizar lista de imágenes para mostrar checkboxes en modo batch
+                loadImages();
+            });
+        });
+        
+        // Limpiar selección batch
+        document.getElementById('btn-clear-batch').addEventListener('click', () => {
+            batchSelectedImages = [];
+            updateBatchSelectionUI();
+            loadImages();
         });
 
         // ==================== Configs ====================
@@ -1370,8 +1447,42 @@ HTML_TEMPLATE = """
         });
 
         document.getElementById('batch-files').addEventListener('change', (e) => {
-            const count = e.target.files.length;
+            const files = e.target.files;
+            const count = files.length;
             document.getElementById('batch-file-name').textContent = count > 0 ? `${count} archivos seleccionados` : 'Ningún archivo';
+            
+            // Mostrar preview de archivos
+            if (count > 0) {
+                const previewDiv = document.getElementById('batch-preview');
+                const listDiv = document.getElementById('batch-preview-list');
+                previewDiv.style.display = 'block';
+                
+                // Separar imágenes y JSONs
+                const images = [];
+                const jsons = [];
+                for (let file of files) {
+                    if (file.name.toLowerCase().endsWith('.json')) {
+                        jsons.push(file.name);
+                    } else {
+                        images.push(file.name);
+                    }
+                }
+                
+                // Mostrar pares imagen-json
+                let html = '<table class="table is-narrow is-fullwidth is-size-7"><thead><tr><th>Imagen</th><th>JSON</th></tr></thead><tbody>';
+                for (let img of images) {
+                    const imgStem = img.substring(0, img.lastIndexOf('.'));
+                    const matchingJson = jsons.find(j => j.substring(0, j.lastIndexOf('.')) === imgStem);
+                    html += `<tr>
+                        <td>${img}</td>
+                        <td>${matchingJson ? '<span class="tag is-success is-light">' + matchingJson + '</span>' : '<span class="tag is-warning is-light">Sin JSON</span>'}</td>
+                    </tr>`;
+                }
+                html += '</tbody></table>';
+                listDiv.innerHTML = html;
+            } else {
+                document.getElementById('batch-preview').style.display = 'none';
+            }
         });
 
         document.getElementById('btn-upload-single').addEventListener('click', async () => {
@@ -1402,36 +1513,145 @@ HTML_TEMPLATE = """
             const files = document.getElementById('batch-files').files;
             if (files.length === 0) return alert('Selecciona archivos');
             
+            // Mostrar progreso
+            const progressDiv = document.getElementById('batch-upload-progress');
+            const progressBar = document.getElementById('batch-progress-bar');
+            const progressText = document.getElementById('batch-progress-text');
+            const uploadBtn = document.getElementById('btn-upload-batch');
+            
+            progressDiv.style.display = 'block';
+            uploadBtn.disabled = true;
+            uploadBtn.classList.add('is-loading');
+            progressText.textContent = 'Preparando archivos...';
+            progressBar.value = 10;
+            
             const formData = new FormData();
             for (let file of files) {
                 formData.append('files', file);
             }
             
-            await fetch('/api/images/upload-batch', {method: 'POST', body: formData});
-            loadImages();
-            document.getElementById('batch-files').value = '';
-            document.getElementById('batch-file-name').textContent = 'Ningún archivo';
+            try {
+                progressText.textContent = `Subiendo ${files.length} archivos...`;
+                progressBar.value = 30;
+                
+                const response = await fetch('/api/images/upload-batch', {method: 'POST', body: formData});
+                const result = await response.json();
+                
+                progressBar.value = 100;
+                progressText.textContent = `✓ ${result.images.length} imágenes subidas correctamente`;
+                
+                // Limpiar después de 2 segundos
+                setTimeout(() => {
+                    progressDiv.style.display = 'none';
+                    document.getElementById('batch-preview').style.display = 'none';
+                }, 2000);
+                
+                loadImages();
+            } catch (error) {
+                progressText.textContent = 'Error al subir archivos';
+                progressBar.classList.add('is-danger');
+            } finally {
+                uploadBtn.disabled = false;
+                uploadBtn.classList.remove('is-loading');
+                document.getElementById('batch-files').value = '';
+                document.getElementById('batch-file-name').textContent = 'Ningún archivo';
+            }
         });
 
         async function loadImages() {
             const res = await fetch('/api/images');
             const images = await res.json();
+            allImagesData = images; // Cache para uso posterior
             
-            document.getElementById('images-list').innerHTML = images.map(img => `
-                <div class="box is-clickable" onclick="selectImage('${img.name}', ${img.has_context})">
-                    <div class="level">
-                        <div class="level-left">
-                            <div>
-                                <p class="has-text-weight-bold">${img.name}</p>
-                                <p class="is-size-7 has-text-grey">
-                                    ${(img.size / 1024).toFixed(1)} KB
-                                    ${img.has_context ? '<span class="tag is-success is-light ml-2">JSON</span>' : ''}
-                                </p>
+            if (execMode === 'batch') {
+                // Modo batch: mostrar checkboxes
+                document.getElementById('images-list').innerHTML = images.map(img => {
+                    const isSelected = batchSelectedImages.some(b => b.name === img.name);
+                    return `
+                    <div class="box is-clickable ${isSelected ? 'has-background-success-light' : ''}" 
+                         onclick="toggleBatchImage('${img.name}', ${img.has_context})">
+                        <div class="level">
+                            <div class="level-left">
+                                <div>
+                                    <label class="checkbox">
+                                        <input type="checkbox" ${isSelected ? 'checked' : ''} onclick="event.stopPropagation(); toggleBatchImage('${img.name}', ${img.has_context})">
+                                        <strong class="ml-2">${img.name}</strong>
+                                    </label>
+                                    <p class="is-size-7 has-text-grey ml-4">
+                                        ${(img.size / 1024).toFixed(1)} KB
+                                        ${img.has_context ? '<span class="tag is-success is-light ml-2">JSON</span>' : ''}
+                                    </p>
+                                </div>
                             </div>
                         </div>
                     </div>
-                </div>
-            `).join('') || '<p class="has-text-grey">No hay imágenes</p>';
+                `}).join('') || '<p class="has-text-grey">No hay imágenes</p>';
+            } else {
+                // Modo individual: click para seleccionar
+                document.getElementById('images-list').innerHTML = images.map(img => `
+                    <div class="box is-clickable ${selectedImage === img.name ? 'has-background-primary-light' : ''}" 
+                         onclick="selectImage('${img.name}', ${img.has_context})">
+                        <div class="level">
+                            <div class="level-left">
+                                <div>
+                                    <p class="has-text-weight-bold">${img.name}</p>
+                                    <p class="is-size-7 has-text-grey">
+                                        ${(img.size / 1024).toFixed(1)} KB
+                                        ${img.has_context ? '<span class="tag is-success is-light ml-2">JSON</span>' : ''}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `).join('') || '<p class="has-text-grey">No hay imágenes</p>';
+            }
+        }
+        
+        // Función para toggle de imagen en modo batch
+        async function toggleBatchImage(name, hasContext) {
+            const existingIndex = batchSelectedImages.findIndex(b => b.name === name);
+            
+            if (existingIndex >= 0) {
+                // Remover de la selección
+                batchSelectedImages.splice(existingIndex, 1);
+            } else {
+                // Agregar a la selección
+                let contextData = null;
+                if (hasContext) {
+                    const res = await fetch('/api/images/' + name + '/context');
+                    const data = await res.json();
+                    contextData = data.context_data;
+                }
+                batchSelectedImages.push({ name, has_context: hasContext, context_data: contextData });
+            }
+            
+            updateBatchSelectionUI();
+            loadImages(); // Refrescar para actualizar visual
+        }
+        
+        // Actualizar UI de selección batch
+        function updateBatchSelectionUI() {
+            document.getElementById('batch-count').textContent = batchSelectedImages.length;
+            
+            const listDiv = document.getElementById('batch-images-list');
+            if (batchSelectedImages.length === 0) {
+                listDiv.innerHTML = '<p class="has-text-grey is-size-7">Haz click en las imágenes de la lista para agregarlas</p>';
+            } else {
+                listDiv.innerHTML = batchSelectedImages.map(img => `
+                    <div class="tag is-medium is-primary is-light mr-1 mb-1">
+                        ${img.name}
+                        ${img.has_context ? '<span class="tag is-success is-small ml-1">JSON</span>' : ''}
+                        <button class="delete is-small" onclick="removeBatchImage('${img.name}')"></button>
+                    </div>
+                `).join('');
+            }
+        }
+        
+        // Remover imagen de selección batch
+        function removeBatchImage(name) {
+            batchSelectedImages = batchSelectedImages.filter(b => b.name !== name);
+            updateBatchSelectionUI();
+            loadImages();
         }
 
         async function selectImage(name, hasContext) {
@@ -1490,6 +1710,145 @@ HTML_TEMPLATE = """
             const {execution_id} = await res.json();
             pollExecutionStatus(execution_id);
         });
+        
+        // Ejecutar batch
+        document.getElementById('btn-execute-batch').addEventListener('click', async () => {
+            if (batchSelectedImages.length === 0) return alert('Selecciona al menos una imagen');
+            
+            const selectedPipelines = Array.from(document.querySelectorAll('.pipeline-checkbox:checked'))
+                .map(cb => cb.value);
+            
+            if (selectedPipelines.length === 0) return alert('Selecciona un pipeline');
+            if (selectedPipelines.length > 1) return alert('En modo batch solo puedes seleccionar un pipeline');
+            
+            const pipelineId = selectedPipelines[0];
+            
+            document.getElementById('results-card').style.display = 'block';
+            document.getElementById('execution-progress').style.display = 'block';
+            document.getElementById('execution-results').innerHTML = '';
+            document.getElementById('progress-text').textContent = `Procesando ${batchSelectedImages.length} imágenes...`;
+            
+            // Preparar datos de imágenes para el batch
+            const imagesData = batchSelectedImages.map(img => ({
+                image_name: img.name,
+                context_data: img.context_data
+            }));
+            
+            const res = await fetch('/api/execute-batch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    pipeline_id: pipelineId,
+                    images: imagesData
+                })
+            });
+            
+            const {execution_id} = await res.json();
+            pollBatchExecutionStatus(execution_id);
+        });
+        
+        // Poll para ejecución batch
+        async function pollBatchExecutionStatus(executionId) {
+            const interval = setInterval(async () => {
+                const res = await fetch('/api/execute/' + executionId + '/status');
+                const status = await res.json();
+                
+                document.getElementById('progress-text').textContent = status.progress || 'Procesando batch...';
+                
+                if (status.status === 'completed') {
+                    clearInterval(interval);
+                    document.getElementById('execution-progress').style.display = 'none';
+                    renderBatchResults(status.results);
+                    loadStatistics();
+                } else if (status.status === 'error') {
+                    clearInterval(interval);
+                    document.getElementById('execution-progress').style.display = 'none';
+                    document.getElementById('execution-results').innerHTML = `
+                        <div class="notification is-danger">${status.error}</div>
+                    `;
+                }
+            }, 1000);
+        }
+        
+        // Renderizar resultados de batch
+        function renderBatchResults(batchResult) {
+            if (!batchResult) {
+                document.getElementById('execution-results').innerHTML = '<p class="has-text-grey">Sin resultados</p>';
+                return;
+            }
+            
+            let html = `
+                <div class="notification is-info is-light mb-4">
+                    <p><strong>Resumen Batch:</strong></p>
+                    <p>Pipeline: <strong>${batchResult.pipeline_name || 'N/A'}</strong></p>
+                    <p>Imágenes procesadas: <strong>${batchResult.total_images || 0}</strong></p>
+                    <p>Exitosas: <strong class="has-text-success">${batchResult.successful || 0}</strong> | 
+                       Fallidas: <strong class="has-text-danger">${batchResult.failed || 0}</strong></p>
+                    <p>Tiempo total: <strong>${((batchResult.total_time_ms || 0) / 1000).toFixed(2)}s</strong></p>
+                    <p>Tokens totales: <strong>${batchResult.total_tokens || 0}</strong></p>
+                    <p>Costo total: <strong>$${(batchResult.total_cost || 0).toFixed(4)}</strong></p>
+                </div>
+            `;
+            
+            // Mostrar resultados individuales
+            if (batchResult.results && batchResult.results.length > 0) {
+                html += '<h4 class="title is-5 mt-4">Resultados por Imagen</h4>';
+                
+                for (const result of batchResult.results) {
+                    const statusClass = result.success ? 'success' : 'error';
+                    const statusIcon = result.success ? 'fa-check-circle has-text-success' : 'fa-times-circle has-text-danger';
+                    
+                    html += `
+                        <div class="box execution-card ${statusClass} mb-3">
+                            <div class="level">
+                                <div class="level-left">
+                                    <div>
+                                        <p class="title is-6">
+                                            <i class="fas ${statusIcon} mr-2"></i>
+                                            ${result.image_name || 'Imagen'}
+                                        </p>
+                                    </div>
+                                </div>
+                                <div class="level-right">
+                                    <div class="has-text-right">
+                                        <p><strong>${(result.total_latency_ms || 0).toFixed(0)}ms</strong></p>
+                                        <p class="is-size-7">${result.total_tokens || 0} tokens | $${(result.total_cost || 0).toFixed(4)}</p>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            ${result.error ? `<div class="notification is-danger is-light is-size-7">${result.error}</div>` : ''}
+                            
+                            ${result.step_results ? `
+                                <details>
+                                    <summary class="is-size-7 has-text-grey">Ver ${result.step_results.length} pasos</summary>
+                                    <div class="mt-2">
+                                        ${result.step_results.map((step, i) => `
+                                            <div class="step-result-card">
+                                                <div class="step-header">
+                                                    <div>
+                                                        <span class="tag is-primary is-small">Paso ${i+1}</span>
+                                                        <strong class="ml-2">${step.step_name}</strong>
+                                                    </div>
+                                                    <div class="is-size-7">
+                                                        ${(step.latency_ms || 0).toFixed(0)}ms | ${step.total_tokens || 0} tokens
+                                                    </div>
+                                                </div>
+                                                <div class="content mt-2">
+                                                    <pre style="white-space: pre-wrap; background: #f5f5f5; padding: 0.5rem; border-radius: 4px; font-size: 0.75rem; max-height: 150px; overflow-y: auto;">${escapeHtml(step.content || '')}</pre>
+                                                </div>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </details>
+                            ` : ''}
+                        </div>
+                    `;
+                }
+            }
+            
+            document.getElementById('execution-results').innerHTML = html;
+        }
 
         async function pollExecutionStatus(executionId) {
             const interval = setInterval(async () => {
