@@ -1,10 +1,12 @@
 """
 LLM Providers Module - Integración con diferentes proveedores de LLM con visión
+Soporta modelos locales via Ollama con host.docker.internal para uso en Docker
 """
 
 import base64
 import time
 import json
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
@@ -51,6 +53,53 @@ class LLMConfig:
             "temperature": self.temperature,
             "extra_params": self.extra_params
         }
+    
+    def to_dict_full(self) -> Dict[str, Any]:
+        """Versión completa con API key para almacenamiento"""
+        return {
+            "name": self.name,
+            "provider": self.provider,
+            "model": self.model,
+            "api_key": self.api_key,
+            "api_base": self.api_base,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "extra_params": self.extra_params
+        }
+
+
+def substitute_variables(text: str, context: Dict[str, Any]) -> str:
+    """
+    Sustituye variables en el texto usando el contexto JSON.
+    Las variables se indican con $variable o $data.campo para acceder a campos anidados.
+    """
+    if not context:
+        return text
+    
+    def get_nested_value(obj: Any, path: str) -> Any:
+        """Obtiene un valor anidado de un objeto usando notación de punto"""
+        parts = path.split('.')
+        current = obj
+        for part in parts:
+            if isinstance(current, dict):
+                current = current.get(part)
+            else:
+                return None
+            if current is None:
+                return None
+        return current
+    
+    # Buscar todas las variables $variable o $path.to.value
+    pattern = r'\$([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)'
+    
+    def replace_var(match):
+        var_path = match.group(1)
+        value = get_nested_value(context, var_path)
+        if value is not None:
+            return str(value)
+        return match.group(0)  # Mantener original si no se encuentra
+    
+    return re.sub(pattern, replace_var, text)
 
 
 class BaseLLMProvider(ABC):
@@ -166,7 +215,6 @@ class OpenAIProvider(BaseLLMProvider):
     
     def _estimate_cost(self, input_tokens: int, output_tokens: int) -> float:
         """Estima el costo basado en el modelo"""
-        # Precios aproximados por 1M tokens (pueden variar)
         pricing = {
             "gpt-4o": {"input": 2.50, "output": 10.00},
             "gpt-4o-mini": {"input": 0.15, "output": 0.60},
@@ -281,7 +329,10 @@ class AnthropicProvider(BaseLLMProvider):
 
 
 class OllamaProvider(BaseLLMProvider):
-    """Proveedor para modelos locales via Ollama"""
+    """
+    Proveedor para modelos locales via Ollama.
+    Soporta host.docker.internal para acceder a Ollama desde Docker.
+    """
     
     async def analyze_image(self, image_path: str, prompt: str) -> LLMResponse:
         start_time = time.time()
@@ -289,6 +340,8 @@ class OllamaProvider(BaseLLMProvider):
         try:
             image_data = self._encode_image(image_path)
             
+            # Usar api_base configurado o localhost por defecto
+            # Para Docker, usar host.docker.internal:11434
             api_base = self.config.api_base or "http://localhost:11434"
             
             payload = {
@@ -312,7 +365,6 @@ class OllamaProvider(BaseLLMProvider):
             
             latency = (time.time() - start_time) * 1000
             
-            # Ollama proporciona métricas diferentes
             eval_count = data.get("eval_count", 0)
             prompt_eval_count = data.get("prompt_eval_count", 0)
             
@@ -351,7 +403,6 @@ class GoogleProvider(BaseLLMProvider):
             image_data = self._encode_image(image_path)
             media_type = self._get_image_media_type(image_path)
             
-            # Usar el endpoint de OpenAI compatible si está configurado
             if self.config.api_base:
                 # Usar formato OpenAI compatible
                 headers = {

@@ -1,47 +1,29 @@
 """
-Vision LLM Comparator - Aplicación Web con FastAPI
-Interfaz gráfica para comparar LLMs visuales con pipelines configurables
+Vision LLM Comparator - Aplicación Web
+Interfaz completa para comparar LLMs visuales con pipelines configurables
 """
 
 import os
+import json
 import uuid
 import asyncio
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import uvicorn
 
 from llm_providers import LLMConfig
-from pipeline import Pipeline, PipelineStep, PipelineRunner, PipelineComparator
+from pipeline import Pipeline, PipelineRunner, PipelineComparator, PipelineReviewer
 from storage import StorageManager
 
-# Inicializar la aplicación
-app = FastAPI(
-    title="Vision LLM Comparator",
-    description="Herramienta para comparar LLMs visuales con pipelines configurables",
-    version="1.0.0"
-)
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Storage
+# Inicializar aplicación
+app = FastAPI(title="Vision LLM Comparator", version="2.0.0")
 storage = StorageManager()
-
-# Estado de ejecuciones en progreso
-running_executions = {}
-
 
 # ==================== Modelos Pydantic ====================
 
@@ -54,37 +36,38 @@ class LLMConfigCreate(BaseModel):
     max_tokens: int = 4096
     temperature: float = 0.7
 
-
 class PipelineStepCreate(BaseModel):
     name: str
     prompt: str
     use_previous_output: bool = True
-
+    llm_config_name: Optional[str] = None
 
 class PipelineCreate(BaseModel):
     name: str
     description: str = ""
-    llm_config_name: str
-    steps: List[PipelineStepCreate]
+    default_llm_config_name: str
+    steps: List[PipelineStepCreate] = []
 
-
-class PipelineUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    steps: Optional[List[PipelineStepCreate]] = None
-
-
-class ExecutionRequest(BaseModel):
+class ExecuteRequest(BaseModel):
     pipeline_ids: List[str]
-    image_path: str
+    image_name: str
+    context_data: Optional[Dict[str, Any]] = None
 
+class BatchExecuteRequest(BaseModel):
+    pipeline_id: str
+    images: List[Dict[str, Any]]  # [{"image_name": "...", "context_data": {...}}]
+
+class ReviewStepRequest(BaseModel):
+    execution_id: str
+    step_id: str
+    is_correct: bool
 
 # ==================== API Endpoints ====================
 
 # --- LLM Configs ---
 
 @app.post("/api/configs")
-async def create_llm_config(config: LLMConfigCreate):
+async def create_config(config: LLMConfigCreate):
     """Crear una nueva configuración de LLM"""
     llm_config = LLMConfig(
         name=config.name,
@@ -96,254 +79,447 @@ async def create_llm_config(config: LLMConfigCreate):
         temperature=config.temperature
     )
     storage.save_llm_config(llm_config)
-    return {"status": "success", "message": f"Configuración '{config.name}' guardada"}
-
+    return {"status": "ok", "name": config.name}
 
 @app.get("/api/configs")
-async def list_llm_configs():
+async def list_configs():
     """Listar todas las configuraciones de LLM"""
     return storage.list_llm_configs()
 
-
 @app.delete("/api/configs/{name}")
-async def delete_llm_config(name: str):
+async def delete_config(name: str):
     """Eliminar una configuración de LLM"""
     if storage.delete_llm_config(name):
-        return {"status": "success", "message": f"Configuración '{name}' eliminada"}
-    raise HTTPException(status_code=404, detail="Configuración no encontrada")
-
+        return {"status": "ok"}
+    raise HTTPException(status_code=404, detail="Config not found")
 
 # --- Pipelines ---
 
 @app.post("/api/pipelines")
 async def create_pipeline(pipeline_data: PipelineCreate):
     """Crear un nuevo pipeline"""
-    # Cargar la configuración de LLM
-    llm_config = storage.load_llm_config(pipeline_data.llm_config_name)
-    if not llm_config:
-        raise HTTPException(status_code=404, detail=f"Configuración LLM '{pipeline_data.llm_config_name}' no encontrada")
-    
     pipeline = Pipeline(
         id=str(uuid.uuid4()),
         name=pipeline_data.name,
         description=pipeline_data.description,
-        llm_config=llm_config
+        default_llm_config_name=pipeline_data.default_llm_config_name
     )
     
     for step in pipeline_data.steps:
         pipeline.add_step(
             name=step.name,
             prompt=step.prompt,
-            use_previous_output=step.use_previous_output
+            use_previous_output=step.use_previous_output,
+            llm_config_name=step.llm_config_name
         )
     
     storage.save_pipeline(pipeline)
-    return {"status": "success", "pipeline_id": pipeline.id, "message": f"Pipeline '{pipeline.name}' creado"}
-
+    return {"status": "ok", "id": pipeline.id}
 
 @app.get("/api/pipelines")
 async def list_pipelines():
     """Listar todos los pipelines"""
     return storage.list_pipelines()
 
-
 @app.get("/api/pipelines/{pipeline_id}")
 async def get_pipeline(pipeline_id: str):
-    """Obtener detalles de un pipeline"""
+    """Obtener un pipeline por ID"""
     pipeline = storage.load_pipeline(pipeline_id)
     if not pipeline:
-        raise HTTPException(status_code=404, detail="Pipeline no encontrado")
+        raise HTTPException(status_code=404, detail="Pipeline not found")
     return pipeline.to_dict()
 
-
 @app.put("/api/pipelines/{pipeline_id}")
-async def update_pipeline(pipeline_id: str, update_data: PipelineUpdate):
+async def update_pipeline(pipeline_id: str, pipeline_data: PipelineCreate):
     """Actualizar un pipeline existente"""
-    pipeline = storage.load_pipeline(pipeline_id)
-    if not pipeline:
-        raise HTTPException(status_code=404, detail="Pipeline no encontrado")
+    existing = storage.load_pipeline(pipeline_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
     
-    if update_data.name:
-        pipeline.name = update_data.name
-    if update_data.description is not None:
-        pipeline.description = update_data.description
-    if update_data.steps is not None:
-        pipeline.steps = []
-        for step in update_data.steps:
-            pipeline.add_step(
-                name=step.name,
-                prompt=step.prompt,
-                use_previous_output=step.use_previous_output
-            )
+    pipeline = Pipeline(
+        id=pipeline_id,
+        name=pipeline_data.name,
+        description=pipeline_data.description,
+        default_llm_config_name=pipeline_data.default_llm_config_name,
+        created_at=existing.created_at
+    )
+    
+    for step in pipeline_data.steps:
+        pipeline.add_step(
+            name=step.name,
+            prompt=step.prompt,
+            use_previous_output=step.use_previous_output,
+            llm_config_name=step.llm_config_name
+        )
     
     storage.save_pipeline(pipeline)
-    return {"status": "success", "message": f"Pipeline '{pipeline.name}' actualizado"}
-
+    return {"status": "ok", "id": pipeline.id}
 
 @app.delete("/api/pipelines/{pipeline_id}")
 async def delete_pipeline(pipeline_id: str):
     """Eliminar un pipeline"""
     if storage.delete_pipeline(pipeline_id):
-        return {"status": "success", "message": "Pipeline eliminado"}
-    raise HTTPException(status_code=404, detail="Pipeline no encontrado")
-
+        return {"status": "ok"}
+    raise HTTPException(status_code=404, detail="Pipeline not found")
 
 # --- Images ---
 
 @app.post("/api/images/upload")
-async def upload_image(file: UploadFile = File(...)):
-    """Subir una imagen"""
-    # Validar tipo de archivo
-    allowed_types = {"image/jpeg", "image/png", "image/gif", "image/webp"}
-    if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
-    
-    # Guardar temporalmente
-    temp_path = f"/tmp/{uuid.uuid4()}_{file.filename}"
+async def upload_image(
+    file: UploadFile = File(...),
+    context_json: Optional[str] = Form(None)
+):
+    """Subir una imagen con contexto JSON opcional"""
+    # Guardar imagen
+    temp_path = f"/tmp/{file.filename}"
     with open(temp_path, "wb") as f:
         content = await file.read()
         f.write(content)
     
-    # Mover a directorio de imágenes
     saved_path = storage.save_image(temp_path, file.filename)
     os.remove(temp_path)
     
-    return {"status": "success", "path": saved_path, "filename": file.filename}
+    # Guardar contexto si se proporciona
+    if context_json:
+        try:
+            context_data = json.loads(context_json)
+            context_name = Path(file.filename).stem
+            storage.save_context(context_data, context_name)
+        except json.JSONDecodeError:
+            pass
+    
+    return {
+        "status": "ok",
+        "filename": file.filename,
+        "path": saved_path
+    }
 
+@app.post("/api/images/upload-batch")
+async def upload_batch(files: List[UploadFile] = File(...)):
+    """Subir múltiples imágenes con sus contextos JSON"""
+    results = []
+    images = []
+    contexts = []
+    
+    # Separar imágenes y JSONs
+    for file in files:
+        if file.filename.lower().endswith('.json'):
+            contexts.append(file)
+        else:
+            images.append(file)
+    
+    # Procesar imágenes
+    for image_file in images:
+        temp_path = f"/tmp/{image_file.filename}"
+        with open(temp_path, "wb") as f:
+            content = await image_file.read()
+            f.write(content)
+        
+        saved_path = storage.save_image(temp_path, image_file.filename)
+        os.remove(temp_path)
+        
+        # Buscar contexto correspondiente
+        image_stem = Path(image_file.filename).stem
+        context_data = None
+        
+        for ctx_file in contexts:
+            ctx_stem = Path(ctx_file.filename).stem
+            if ctx_stem == image_stem:
+                try:
+                    ctx_content = await ctx_file.read()
+                    context_data = json.loads(ctx_content.decode('utf-8'))
+                    storage.save_context(context_data, image_stem)
+                    # Reset file position for potential reuse
+                    await ctx_file.seek(0)
+                except:
+                    pass
+                break
+        
+        results.append({
+            "filename": image_file.filename,
+            "path": saved_path,
+            "has_context": context_data is not None
+        })
+    
+    return {"status": "ok", "images": results}
 
 @app.get("/api/images")
 async def list_images():
-    """Listar imágenes guardadas"""
+    """Listar todas las imágenes"""
     return storage.list_images()
-
 
 @app.get("/api/images/view/{filename}")
 async def view_image(filename: str):
-    """Obtener una imagen para visualización"""
+    """Ver una imagen"""
     image_path = storage.images_dir / filename
     if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Imagen no encontrada")
+        raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(str(image_path))
 
+@app.get("/api/images/{filename}/context")
+async def get_image_context(filename: str):
+    """Obtener el contexto JSON de una imagen"""
+    context_name = Path(filename).stem
+    context_data = storage.load_context(context_name)
+    return {"context_data": context_data}
 
-# --- Executions ---
+# --- Execution ---
+
+execution_status = {}
 
 @app.post("/api/execute")
-async def execute_pipelines(request: ExecutionRequest, background_tasks: BackgroundTasks):
-    """Ejecutar uno o más pipelines sobre una imagen"""
+async def execute_pipelines(request: ExecuteRequest, background_tasks: BackgroundTasks):
+    """Ejecutar pipelines sobre una imagen"""
     execution_id = str(uuid.uuid4())
-    
-    # Validar que la imagen existe
-    if not Path(request.image_path).exists():
-        raise HTTPException(status_code=404, detail="Imagen no encontrada")
-    
-    # Cargar pipelines
-    pipelines = []
-    for pid in request.pipeline_ids:
-        pipeline = storage.load_pipeline(pid)
-        if not pipeline:
-            raise HTTPException(status_code=404, detail=f"Pipeline {pid} no encontrado")
-        pipelines.append(pipeline)
-    
-    # Iniciar ejecución en background
-    running_executions[execution_id] = {
+    execution_status[execution_id] = {
         "status": "running",
         "progress": "Iniciando...",
-        "results": [],
-        "started_at": datetime.now().isoformat()
+        "results": []
     }
     
     background_tasks.add_task(
-        run_pipelines_background,
+        run_execution,
         execution_id,
-        pipelines,
-        request.image_path
+        request.pipeline_ids,
+        request.image_name,
+        request.context_data
     )
     
-    return {"status": "started", "execution_id": execution_id}
+    return {"execution_id": execution_id}
 
-
-async def run_pipelines_background(execution_id: str, pipelines: List[Pipeline], image_path: str):
-    """Ejecuta los pipelines en background"""
-    comparator = PipelineComparator()
-    
-    def progress_callback(message: str):
-        running_executions[execution_id]["progress"] = message
-    
+async def run_execution(execution_id: str, pipeline_ids: List[str], 
+                        image_name: str, context_data: Optional[Dict[str, Any]]):
+    """Ejecutar pipelines en background"""
     try:
-        results = await comparator.compare(pipelines, image_path, progress_callback)
+        image_info = storage.get_image_with_context(image_name)
+        if not image_info:
+            execution_status[execution_id] = {
+                "status": "error",
+                "error": f"Imagen no encontrada: {image_name}"
+            }
+            return
+        
+        image_path = image_info["image_path"]
+        # Usar contexto proporcionado o el asociado a la imagen
+        final_context = context_data or image_info.get("context_data")
+        
+        pipelines = []
+        for pid in pipeline_ids:
+            pipeline = storage.load_pipeline(pid)
+            if pipeline:
+                pipelines.append(pipeline)
+        
+        if not pipelines:
+            execution_status[execution_id] = {
+                "status": "error",
+                "error": "No se encontraron pipelines válidos"
+            }
+            return
+        
+        comparator = PipelineComparator(config_loader=storage.get_config_loader())
+        
+        def progress_callback(msg):
+            execution_status[execution_id]["progress"] = msg
+        
+        results = await comparator.compare(
+            pipelines, 
+            image_path, 
+            final_context,
+            progress_callback
+        )
         
         # Guardar resultados
         for result in results:
             storage.save_execution(result)
         
-        # Generar reporte comparativo
+        # Generar reporte
         report = PipelineComparator.generate_comparison_report(results)
         
-        running_executions[execution_id] = {
+        execution_status[execution_id] = {
             "status": "completed",
-            "progress": "Completado",
             "results": [r.to_dict() for r in results],
-            "report": report,
-            "completed_at": datetime.now().isoformat()
+            "report": report
         }
+        
     except Exception as e:
-        running_executions[execution_id] = {
+        execution_status[execution_id] = {
             "status": "error",
-            "progress": f"Error: {str(e)}",
             "error": str(e)
         }
 
+@app.post("/api/execute-batch")
+async def execute_batch(request: BatchExecuteRequest, background_tasks: BackgroundTasks):
+    """Ejecutar un pipeline sobre múltiples imágenes"""
+    execution_id = str(uuid.uuid4())
+    execution_status[execution_id] = {
+        "status": "running",
+        "progress": "Iniciando batch...",
+        "results": None
+    }
+    
+    background_tasks.add_task(
+        run_batch_execution,
+        execution_id,
+        request.pipeline_id,
+        request.images
+    )
+    
+    return {"execution_id": execution_id}
+
+async def run_batch_execution(execution_id: str, pipeline_id: str, 
+                              images: List[Dict[str, Any]]):
+    """Ejecutar batch en background"""
+    try:
+        pipeline = storage.load_pipeline(pipeline_id)
+        if not pipeline:
+            execution_status[execution_id] = {
+                "status": "error",
+                "error": f"Pipeline no encontrado: {pipeline_id}"
+            }
+            return
+        
+        # Preparar pares imagen-contexto
+        image_context_pairs = []
+        for img_data in images:
+            image_name = img_data.get("image_name")
+            image_info = storage.get_image_with_context(image_name)
+            
+            if image_info:
+                context = img_data.get("context_data") or image_info.get("context_data")
+                image_context_pairs.append({
+                    "image_path": image_info["image_path"],
+                    "context_data": context
+                })
+        
+        if not image_context_pairs:
+            execution_status[execution_id] = {
+                "status": "error",
+                "error": "No se encontraron imágenes válidas"
+            }
+            return
+        
+        runner = PipelineRunner(config_loader=storage.get_config_loader())
+        
+        def progress_callback(msg):
+            execution_status[execution_id]["progress"] = msg
+        
+        batch_result = await runner.run_batch(
+            pipeline,
+            image_context_pairs,
+            progress_callback
+        )
+        
+        # Guardar batch
+        storage.save_batch_execution(batch_result)
+        
+        execution_status[execution_id] = {
+            "status": "completed",
+            "results": batch_result.to_dict()
+        }
+        
+    except Exception as e:
+        execution_status[execution_id] = {
+            "status": "error",
+            "error": str(e)
+        }
 
 @app.get("/api/execute/{execution_id}/status")
 async def get_execution_status(execution_id: str):
-    """Obtener el estado de una ejecución"""
-    if execution_id not in running_executions:
-        raise HTTPException(status_code=404, detail="Ejecución no encontrada")
-    return running_executions[execution_id]
-
+    """Obtener estado de una ejecución"""
+    if execution_id not in execution_status:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    return execution_status[execution_id]
 
 # --- History ---
 
 @app.get("/api/history")
-async def get_history(limit: int = 50, pipeline_id: str = None):
-    """Obtener historial de ejecuciones"""
-    return storage.list_executions(limit=limit, pipeline_id=pipeline_id)
-
+async def list_history(
+    limit: int = 100,
+    pipeline_id: Optional[str] = None,
+    review_status: Optional[str] = None
+):
+    """Listar historial de ejecuciones"""
+    return storage.list_executions(limit, pipeline_id, review_status)
 
 @app.get("/api/history/{execution_id}")
 async def get_execution_details(execution_id: str):
-    """Obtener detalles completos de una ejecución"""
+    """Obtener detalles de una ejecución"""
     details = storage.get_execution_details(execution_id)
     if not details:
-        raise HTTPException(status_code=404, detail="Ejecución no encontrada")
+        raise HTTPException(status_code=404, detail="Execution not found")
     return details
-
 
 @app.delete("/api/history/{execution_id}")
 async def delete_execution(execution_id: str):
-    """Eliminar una ejecución del historial"""
+    """Eliminar una ejecución"""
     if storage.delete_execution(execution_id):
-        return {"status": "success", "message": "Ejecución eliminada"}
-    raise HTTPException(status_code=404, detail="Ejecución no encontrada")
-
+        return {"status": "ok"}
+    raise HTTPException(status_code=404, detail="Execution not found")
 
 @app.delete("/api/history")
-async def clear_history(before_date: str = None):
-    """Limpiar historial de ejecuciones"""
-    count = storage.clear_history(before_date)
-    return {"status": "success", "deleted_count": count}
+async def clear_history():
+    """Limpiar todo el historial"""
+    count = storage.clear_history()
+    return {"status": "ok", "deleted": count}
 
+# --- Reviews ---
+
+@app.post("/api/reviews")
+async def review_step(request: ReviewStepRequest):
+    """Revisar un paso de una ejecución"""
+    from pipeline import PipelineExecution
+    
+    exec_data = storage.get_execution_details(request.execution_id)
+    if not exec_data:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    
+    execution = PipelineExecution.from_dict(exec_data)
+    
+    # Reconstruir step_results para tener acceso completo
+    execution.step_reviews = exec_data.get("step_reviews", {})
+    
+    PipelineReviewer.review_step(execution, request.step_id, request.is_correct)
+    
+    # Actualizar en storage
+    exec_data["step_reviews"] = execution.step_reviews
+    exec_data["review_status"] = execution.review_status
+    
+    # Guardar actualización
+    for date_dir in storage.executions_dir.iterdir():
+        if date_dir.is_dir():
+            filepath = date_dir / f"{request.execution_id}.json"
+            if filepath.exists():
+                with open(filepath, "w", encoding="utf-8") as f:
+                    json.dump(exec_data, f, indent=2, ensure_ascii=False)
+                break
+    
+    return {
+        "status": "ok",
+        "review_status": execution.review_status,
+        "step_reviews": execution.step_reviews
+    }
+
+@app.get("/api/reviews/statistics")
+async def get_review_statistics():
+    """Obtener estadísticas de revisiones"""
+    return storage.get_review_statistics()
 
 # --- Statistics ---
 
 @app.get("/api/statistics")
 async def get_statistics():
-    """Obtener estadísticas de uso"""
+    """Obtener estadísticas generales"""
     return storage.get_statistics()
 
+# --- Batch History ---
 
-# ==================== Frontend HTML ====================
+@app.get("/api/batch-history")
+async def list_batch_history(limit: int = 50):
+    """Listar historial de ejecuciones batch"""
+    return storage.list_batch_executions(limit)
+
+
+# ==================== Interfaz Web ====================
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -356,181 +532,155 @@ HTML_TEMPLATE = """
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         :root {
-            --primary-color: #3273dc;
-            --success-color: #48c774;
-            --danger-color: #f14668;
-            --warning-color: #ffdd57;
+            --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         }
-        
         body {
-            min-height: 100vh;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
         }
-        
-        .main-container {
-            padding: 2rem;
-        }
-        
-        .card {
-            border-radius: 12px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-        
-        .card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 30px rgba(0,0,0,0.15);
-        }
-        
         .navbar {
             background: rgba(255,255,255,0.95);
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
-        
-        .navbar-brand .navbar-item {
-            font-weight: bold;
-            font-size: 1.3rem;
-            color: var(--primary-color);
+        .main-container {
+            padding: 2rem;
         }
-        
+        .card {
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            margin-bottom: 1.5rem;
+        }
+        .card-header {
+            background: linear-gradient(135deg, #f5f7fa 0%, #e4e8eb 100%);
+            border-radius: 12px 12px 0 0;
+        }
         .tabs-container {
             background: white;
             border-radius: 12px;
             padding: 1rem;
             margin-bottom: 1.5rem;
         }
-        
+        .tab-content {
+            display: none;
+        }
+        .tab-content.is-active {
+            display: block;
+        }
+        .step-card {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            border-left: 4px solid #667eea;
+        }
+        .metric-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+        }
+        .metric-box .value {
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+        .metric-box .label {
+            font-size: 0.85rem;
+            opacity: 0.9;
+        }
+        .execution-card {
+            border-left: 4px solid #667eea;
+            transition: all 0.3s;
+        }
+        .execution-card:hover {
+            transform: translateX(5px);
+        }
+        .execution-card.success {
+            border-left-color: #48c774;
+        }
+        .execution-card.error {
+            border-left-color: #f14668;
+        }
+        .review-btn {
+            margin: 0.25rem;
+        }
+        .review-btn.correct {
+            background-color: #48c774;
+            color: white;
+        }
+        .review-btn.incorrect {
+            background-color: #f14668;
+            color: white;
+        }
+        .context-preview {
+            background: #1a1a2e;
+            color: #00ff88;
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 0.85rem;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .prompt-preview {
+            background: #f5f5f5;
+            padding: 0.75rem;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 0.9rem;
+            white-space: pre-wrap;
+        }
+        .model-badge {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            margin-right: 0.5rem;
+        }
+        .accuracy-bar {
+            height: 8px;
+            border-radius: 4px;
+            background: #e0e0e0;
+            overflow: hidden;
+        }
+        .accuracy-bar .fill {
+            height: 100%;
+            background: linear-gradient(90deg, #48c774, #00d1b2);
+            transition: width 0.5s;
+        }
         .image-preview {
             max-width: 100%;
             max-height: 300px;
             border-radius: 8px;
-            object-fit: contain;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
-        
-        .step-card {
-            background: #f5f5f5;
+        .step-result-card {
+            background: white;
             border-radius: 8px;
             padding: 1rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+        .step-result-card .step-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
             margin-bottom: 0.75rem;
-            border-left: 4px solid var(--primary-color);
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid #eee;
         }
-        
-        .result-card {
-            border-left: 4px solid var(--success-color);
-        }
-        
-        .result-card.error {
-            border-left-color: var(--danger-color);
-        }
-        
-        .metrics-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 1rem;
-        }
-        
-        .metric-box {
+        .counter-badge {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            padding: 1rem;
-            border-radius: 8px;
-            text-align: center;
-        }
-        
-        .metric-value {
-            font-size: 1.5rem;
-            font-weight: bold;
-        }
-        
-        .metric-label {
-            font-size: 0.85rem;
-            opacity: 0.9;
-        }
-        
-        .pipeline-badge {
-            display: inline-block;
-            padding: 0.25rem 0.75rem;
-            background: var(--primary-color);
-            color: white;
+            padding: 0.5rem 1rem;
             border-radius: 20px;
+            font-weight: bold;
+        }
+        .help-text {
             font-size: 0.85rem;
-            margin-right: 0.5rem;
-        }
-        
-        .loading-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0,0,0,0.5);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 1000;
-        }
-        
-        .loading-card {
-            background: white;
-            padding: 2rem;
-            border-radius: 12px;
-            text-align: center;
-            min-width: 300px;
-        }
-        
-        .comparison-table th {
-            background: #f5f5f5;
-        }
-        
-        .comparison-table .best {
-            background: #effaf3;
-            font-weight: bold;
-        }
-        
-        .prompt-textarea {
-            min-height: 100px;
-            font-family: monospace;
-        }
-        
-        .hidden {
-            display: none !important;
-        }
-        
-        .fade-in {
-            animation: fadeIn 0.3s ease-in;
-        }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        .response-content {
-            background: #f8f9fa;
-            padding: 1rem;
-            border-radius: 8px;
-            white-space: pre-wrap;
-            font-family: monospace;
-            font-size: 0.9rem;
-            max-height: 400px;
-            overflow-y: auto;
-        }
-        
-        .config-form .field {
-            margin-bottom: 1rem;
-        }
-        
-        .step-number {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 28px;
-            height: 28px;
-            background: var(--primary-color);
-            color: white;
-            border-radius: 50%;
-            font-weight: bold;
-            margin-right: 0.5rem;
+            color: #666;
+            margin-top: 0.25rem;
         }
     </style>
 </head>
@@ -538,17 +688,16 @@ HTML_TEMPLATE = """
     <nav class="navbar" role="navigation">
         <div class="navbar-brand">
             <a class="navbar-item" href="#">
-                <i class="fas fa-eye mr-2"></i> Vision LLM Comparator
+                <i class="fas fa-eye mr-2"></i>
+                <strong>Vision LLM Comparator</strong>
             </a>
         </div>
-        <div class="navbar-menu">
-            <div class="navbar-end">
-                <div class="navbar-item">
-                    <span class="tag is-info" id="stats-badge">
-                        <i class="fas fa-chart-bar mr-1"></i>
-                        <span id="total-executions">0</span> ejecuciones
-                    </span>
-                </div>
+        <div class="navbar-end">
+            <div class="navbar-item">
+                <span class="counter-badge" id="execution-counter">
+                    <i class="fas fa-chart-line mr-1"></i>
+                    <span id="total-executions">0</span> ejecuciones
+                </span>
             </div>
         </div>
     </nav>
@@ -569,74 +718,153 @@ HTML_TEMPLATE = """
                     <li data-tab="history">
                         <a><i class="fas fa-history mr-2"></i>Historial</a>
                     </li>
-                    <li data-tab="stats">
-                        <a><i class="fas fa-chart-line mr-2"></i>Estadísticas</a>
+                    <li data-tab="reviews">
+                        <a><i class="fas fa-check-double mr-2"></i>Revisiones</a>
+                    </li>
+                    <li data-tab="statistics">
+                        <a><i class="fas fa-chart-bar mr-2"></i>Estadísticas</a>
                     </li>
                 </ul>
             </div>
         </div>
 
         <!-- Tab: Ejecutar -->
-        <div id="tab-execute" class="tab-content">
+        <div id="tab-execute" class="tab-content is-active">
             <div class="columns">
-                <div class="column is-4">
+                <div class="column is-5">
                     <div class="card">
-                        <div class="card-header">
+                        <header class="card-header">
                             <p class="card-header-title">
-                                <i class="fas fa-image mr-2"></i>Imagen
+                                <i class="fas fa-upload mr-2"></i>Subir Imagen
                             </p>
-                        </div>
+                        </header>
                         <div class="card-content">
-                            <div class="file has-name is-fullwidth is-boxed">
-                                <label class="file-label">
-                                    <input class="file-input" type="file" id="image-upload" accept="image/*">
-                                    <span class="file-cta">
-                                        <span class="file-icon">
-                                            <i class="fas fa-upload"></i>
+                            <div class="tabs is-small is-toggle">
+                                <ul>
+                                    <li class="is-active" data-upload-tab="single">
+                                        <a>Imagen Individual</a>
+                                    </li>
+                                    <li data-upload-tab="batch">
+                                        <a>Batch (Múltiples)</a>
+                                    </li>
+                                </ul>
+                            </div>
+                            
+                            <!-- Single Upload -->
+                            <div id="upload-single" class="upload-tab-content">
+                                <div class="file has-name is-fullwidth is-primary mb-3">
+                                    <label class="file-label">
+                                        <input class="file-input" type="file" id="image-file" accept="image/*">
+                                        <span class="file-cta">
+                                            <span class="file-icon"><i class="fas fa-image"></i></span>
+                                            <span class="file-label">Seleccionar imagen...</span>
                                         </span>
-                                        <span class="file-label">Subir imagen...</span>
-                                    </span>
-                                    <span class="file-name" id="image-filename">Ningún archivo seleccionado</span>
-                                </label>
+                                        <span class="file-name" id="image-file-name">Ningún archivo</span>
+                                    </label>
+                                </div>
+                                
+                                <div class="field">
+                                    <label class="label">Contexto JSON (opcional)</label>
+                                    <p class="help-text">Variables que se sustituirán en los prompts usando $variable o $data.campo</p>
+                                    <div class="control">
+                                        <textarea class="textarea" id="context-json" rows="6" 
+                                            placeholder='{"vehiclePlate": "ABC123", "data": {"color": "rojo"}}'></textarea>
+                                    </div>
+                                </div>
+                                
+                                <button class="button is-primary is-fullwidth" id="btn-upload-single">
+                                    <i class="fas fa-cloud-upload-alt mr-2"></i>Subir Imagen
+                                </button>
                             </div>
-                            <div class="mt-4 has-text-centered">
-                                <img id="image-preview" class="image-preview hidden" alt="Preview">
+                            
+                            <!-- Batch Upload -->
+                            <div id="upload-batch" class="upload-tab-content" style="display:none;">
+                                <div class="notification is-info is-light">
+                                    <p><strong>Formato batch:</strong> Sube imágenes junto con archivos JSON del mismo nombre.</p>
+                                    <p class="mt-1">Ejemplo: <code>foto01.jpg</code> + <code>foto01.json</code></p>
+                                </div>
+                                
+                                <div class="file has-name is-fullwidth is-primary mb-3">
+                                    <label class="file-label">
+                                        <input class="file-input" type="file" id="batch-files" multiple accept="image/*,.json">
+                                        <span class="file-cta">
+                                            <span class="file-icon"><i class="fas fa-folder-open"></i></span>
+                                            <span class="file-label">Seleccionar archivos...</span>
+                                        </span>
+                                        <span class="file-name" id="batch-file-name">Ningún archivo</span>
+                                    </label>
+                                </div>
+                                
+                                <button class="button is-primary is-fullwidth" id="btn-upload-batch">
+                                    <i class="fas fa-cloud-upload-alt mr-2"></i>Subir Batch
+                                </button>
                             </div>
-                            <input type="hidden" id="current-image-path">
                         </div>
                     </div>
                     
-                    <div class="card mt-4">
-                        <div class="card-header">
+                    <div class="card">
+                        <header class="card-header">
                             <p class="card-header-title">
-                                <i class="fas fa-list-check mr-2"></i>Pipelines a ejecutar
+                                <i class="fas fa-images mr-2"></i>Imágenes Disponibles
                             </p>
-                        </div>
+                        </header>
                         <div class="card-content">
-                            <div id="pipeline-checkboxes">
-                                <p class="has-text-grey">Cargando pipelines...</p>
-                            </div>
-                            <button class="button is-primary is-fullwidth mt-4" id="btn-execute" disabled>
-                                <i class="fas fa-play mr-2"></i>Ejecutar Comparación
-                            </button>
+                            <div id="images-list" style="max-height: 300px; overflow-y: auto;"></div>
                         </div>
                     </div>
                 </div>
                 
-                <div class="column is-8">
+                <div class="column is-7">
                     <div class="card">
-                        <div class="card-header">
+                        <header class="card-header">
                             <p class="card-header-title">
-                                <i class="fas fa-chart-bar mr-2"></i>Resultados de Comparación
+                                <i class="fas fa-play-circle mr-2"></i>Ejecutar Comparación
                             </p>
-                        </div>
+                        </header>
                         <div class="card-content">
-                            <div id="execution-results">
-                                <div class="has-text-centered has-text-grey py-6">
-                                    <i class="fas fa-info-circle fa-2x mb-3"></i>
-                                    <p>Selecciona una imagen y pipelines para ejecutar la comparación</p>
+                            <div class="field">
+                                <label class="label">Imagen Seleccionada</label>
+                                <div class="control">
+                                    <input class="input" type="text" id="selected-image" readonly placeholder="Selecciona una imagen">
                                 </div>
                             </div>
+                            
+                            <div id="selected-image-preview" class="mb-4" style="display:none;">
+                                <img id="preview-img" class="image-preview">
+                            </div>
+                            
+                            <div id="selected-context-preview" class="mb-4" style="display:none;">
+                                <label class="label">Contexto Asociado</label>
+                                <pre class="context-preview" id="context-preview-content"></pre>
+                            </div>
+                            
+                            <div class="field">
+                                <label class="label">Pipelines a Ejecutar</label>
+                                <div id="pipeline-checkboxes"></div>
+                            </div>
+                            
+                            <button class="button is-success is-fullwidth is-medium" id="btn-execute">
+                                <i class="fas fa-rocket mr-2"></i>Ejecutar Comparación
+                            </button>
+                            
+                            <button class="button is-info is-fullwidth mt-2" id="btn-execute-batch" style="display:none;">
+                                <i class="fas fa-layer-group mr-2"></i>Ejecutar Batch
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="card" id="results-card" style="display:none;">
+                        <header class="card-header">
+                            <p class="card-header-title">
+                                <i class="fas fa-poll mr-2"></i>Resultados
+                            </p>
+                        </header>
+                        <div class="card-content">
+                            <div id="execution-progress" style="display:none;">
+                                <progress class="progress is-primary" max="100"></progress>
+                                <p class="has-text-centered" id="progress-text">Procesando...</p>
+                            </div>
+                            <div id="execution-results"></div>
                         </div>
                     </div>
                 </div>
@@ -644,40 +872,36 @@ HTML_TEMPLATE = """
         </div>
 
         <!-- Tab: Pipelines -->
-        <div id="tab-pipelines" class="tab-content hidden">
+        <div id="tab-pipelines" class="tab-content">
             <div class="columns">
-                <div class="column is-4">
+                <div class="column is-5">
                     <div class="card">
-                        <div class="card-header">
+                        <header class="card-header">
                             <p class="card-header-title">
                                 <i class="fas fa-plus mr-2"></i>Crear Pipeline
                             </p>
-                        </div>
+                        </header>
                         <div class="card-content">
                             <div class="field">
                                 <label class="label">Nombre</label>
                                 <input class="input" type="text" id="pipeline-name" placeholder="Mi Pipeline">
                             </div>
+                            
                             <div class="field">
                                 <label class="label">Descripción</label>
                                 <textarea class="textarea" id="pipeline-description" placeholder="Descripción del pipeline..."></textarea>
                             </div>
+                            
                             <div class="field">
-                                <label class="label">Configuración LLM</label>
+                                <label class="label">Configuración LLM por Defecto</label>
                                 <div class="select is-fullwidth">
-                                    <select id="pipeline-llm-config">
-                                        <option value="">Seleccionar...</option>
-                                    </select>
+                                    <select id="pipeline-default-llm"></select>
                                 </div>
                             </div>
                             
-                            <hr>
-                            
                             <div class="field">
                                 <label class="label">Pasos del Pipeline</label>
-                                <div id="pipeline-steps-editor">
-                                    <!-- Steps dinámicos -->
-                                </div>
+                                <div id="pipeline-steps"></div>
                                 <button class="button is-small is-info mt-2" id="btn-add-step">
                                     <i class="fas fa-plus mr-1"></i>Agregar Paso
                                 </button>
@@ -690,17 +914,15 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
                 
-                <div class="column is-8">
+                <div class="column is-7">
                     <div class="card">
-                        <div class="card-header">
+                        <header class="card-header">
                             <p class="card-header-title">
                                 <i class="fas fa-list mr-2"></i>Pipelines Guardados
                             </p>
-                        </div>
+                        </header>
                         <div class="card-content">
-                            <div id="pipelines-list">
-                                <p class="has-text-grey">Cargando...</p>
-                            </div>
+                            <div id="pipelines-list"></div>
                         </div>
                     </div>
                 </div>
@@ -708,20 +930,21 @@ HTML_TEMPLATE = """
         </div>
 
         <!-- Tab: Configuraciones LLM -->
-        <div id="tab-configs" class="tab-content hidden">
+        <div id="tab-configs" class="tab-content">
             <div class="columns">
                 <div class="column is-5">
                     <div class="card">
-                        <div class="card-header">
+                        <header class="card-header">
                             <p class="card-header-title">
                                 <i class="fas fa-plus mr-2"></i>Nueva Configuración
                             </p>
-                        </div>
-                        <div class="card-content config-form">
+                        </header>
+                        <div class="card-content">
                             <div class="field">
                                 <label class="label">Nombre</label>
                                 <input class="input" type="text" id="config-name" placeholder="GPT-4 Vision">
                             </div>
+                            
                             <div class="field">
                                 <label class="label">Proveedor</label>
                                 <div class="select is-fullwidth">
@@ -734,18 +957,23 @@ HTML_TEMPLATE = """
                                     </select>
                                 </div>
                             </div>
+                            
                             <div class="field">
                                 <label class="label">Modelo</label>
                                 <input class="input" type="text" id="config-model" placeholder="gpt-4o">
                             </div>
+                            
                             <div class="field">
                                 <label class="label">API Key</label>
                                 <input class="input" type="password" id="config-api-key" placeholder="sk-...">
                             </div>
+                            
                             <div class="field">
                                 <label class="label">API Base URL (opcional)</label>
+                                <p class="help-text">Para Ollama en Docker: http://host.docker.internal:11434</p>
                                 <input class="input" type="text" id="config-api-base" placeholder="https://api.openai.com/v1">
                             </div>
+                            
                             <div class="columns">
                                 <div class="column">
                                     <div class="field">
@@ -760,6 +988,7 @@ HTML_TEMPLATE = """
                                     </div>
                                 </div>
                             </div>
+                            
                             <button class="button is-primary is-fullwidth" id="btn-save-config">
                                 <i class="fas fa-save mr-2"></i>Guardar Configuración
                             </button>
@@ -769,15 +998,13 @@ HTML_TEMPLATE = """
                 
                 <div class="column is-7">
                     <div class="card">
-                        <div class="card-header">
+                        <header class="card-header">
                             <p class="card-header-title">
                                 <i class="fas fa-list mr-2"></i>Configuraciones Guardadas
                             </p>
-                        </div>
+                        </header>
                         <div class="card-content">
-                            <div id="configs-list">
-                                <p class="has-text-grey">Cargando...</p>
-                            </div>
+                            <div id="configs-list"></div>
                         </div>
                     </div>
                 </div>
@@ -785,187 +1012,170 @@ HTML_TEMPLATE = """
         </div>
 
         <!-- Tab: Historial -->
-        <div id="tab-history" class="tab-content hidden">
+        <div id="tab-history" class="tab-content">
             <div class="card">
-                <div class="card-header">
+                <header class="card-header">
                     <p class="card-header-title">
                         <i class="fas fa-history mr-2"></i>Historial de Ejecuciones
                     </p>
-                    <button class="button is-small is-danger mr-4 mt-3" id="btn-clear-history">
-                        <i class="fas fa-trash mr-1"></i>Limpiar
-                    </button>
-                </div>
-                <div class="card-content">
-                    <div id="history-list">
-                        <p class="has-text-grey">Cargando...</p>
+                    <div class="card-header-icon">
+                        <button class="button is-small is-danger" id="btn-clear-history">
+                            <i class="fas fa-trash mr-1"></i>Limpiar
+                        </button>
                     </div>
+                </header>
+                <div class="card-content">
+                    <div id="history-list"></div>
                 </div>
             </div>
             
-            <!-- Modal para detalles -->
-            <div class="modal" id="execution-detail-modal">
-                <div class="modal-background"></div>
-                <div class="modal-card" style="width: 90%; max-width: 1200px;">
-                    <header class="modal-card-head">
-                        <p class="modal-card-title">Detalles de Ejecución</p>
-                        <button class="delete" aria-label="close"></button>
-                    </header>
-                    <section class="modal-card-body" id="execution-detail-content">
-                        <!-- Contenido dinámico -->
-                    </section>
+            <div class="card mt-4" id="execution-detail-card" style="display:none;">
+                <header class="card-header">
+                    <p class="card-header-title">
+                        <i class="fas fa-info-circle mr-2"></i>Detalle de Ejecución
+                    </p>
+                    <button class="delete" id="close-detail"></button>
+                </header>
+                <div class="card-content" id="execution-detail-content"></div>
+            </div>
+        </div>
+
+        <!-- Tab: Revisiones -->
+        <div id="tab-reviews" class="tab-content">
+            <div class="columns">
+                <div class="column is-8">
+                    <div class="card">
+                        <header class="card-header">
+                            <p class="card-header-title">
+                                <i class="fas fa-clipboard-check mr-2"></i>Ejecuciones Pendientes de Revisión
+                            </p>
+                        </header>
+                        <div class="card-content">
+                            <div id="pending-reviews-list"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="card mt-4" id="review-detail-card" style="display:none;">
+                        <header class="card-header">
+                            <p class="card-header-title">
+                                <i class="fas fa-search mr-2"></i>Revisar Ejecución
+                            </p>
+                        </header>
+                        <div class="card-content" id="review-detail-content"></div>
+                    </div>
+                </div>
+                
+                <div class="column is-4">
+                    <div class="card">
+                        <header class="card-header">
+                            <p class="card-header-title">
+                                <i class="fas fa-chart-pie mr-2"></i>Métricas de Precisión
+                            </p>
+                        </header>
+                        <div class="card-content" id="accuracy-metrics"></div>
+                    </div>
                 </div>
             </div>
         </div>
 
         <!-- Tab: Estadísticas -->
-        <div id="tab-stats" class="tab-content hidden">
-            <div class="columns">
-                <div class="column is-12">
-                    <div class="card">
-                        <div class="card-header">
-                            <p class="card-header-title">
-                                <i class="fas fa-chart-pie mr-2"></i>Resumen General
-                            </p>
-                        </div>
-                        <div class="card-content">
-                            <div class="metrics-grid" id="stats-overview">
-                                <!-- Métricas dinámicas -->
-                            </div>
-                        </div>
-                    </div>
+        <div id="tab-statistics" class="tab-content">
+            <div class="card">
+                <header class="card-header">
+                    <p class="card-header-title">
+                        <i class="fas fa-globe mr-2"></i>Resumen General
+                    </p>
+                </header>
+                <div class="card-content">
+                    <div class="columns" id="stats-summary"></div>
                 </div>
             </div>
             
             <div class="columns mt-4">
-                <div class="column is-12">
+                <div class="column">
                     <div class="card">
-                        <div class="card-header">
+                        <header class="card-header">
                             <p class="card-header-title">
                                 <i class="fas fa-project-diagram mr-2"></i>Estadísticas por Pipeline
                             </p>
-                        </div>
-                        <div class="card-content">
-                            <div id="pipeline-stats">
-                                <!-- Estadísticas por pipeline -->
-                            </div>
-                        </div>
+                        </header>
+                        <div class="card-content" id="pipeline-stats"></div>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="card">
+                        <header class="card-header">
+                            <p class="card-header-title">
+                                <i class="fas fa-robot mr-2"></i>Estadísticas por Modelo
+                            </p>
+                        </header>
+                        <div class="card-content" id="model-stats"></div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Loading Overlay -->
-    <div class="loading-overlay hidden" id="loading-overlay">
-        <div class="loading-card">
-            <div class="mb-4">
-                <i class="fas fa-spinner fa-spin fa-3x has-text-primary"></i>
-            </div>
-            <p class="is-size-5" id="loading-message">Procesando...</p>
-            <progress class="progress is-primary mt-3" max="100" id="loading-progress"></progress>
-        </div>
-    </div>
-
     <script>
-        // ==================== Estado Global ====================
-        let currentImagePath = null;
-        let selectedPipelines = new Set();
-        let stepCounter = 0;
+        // ==================== State ====================
+        let selectedImage = null;
+        let selectedImageContext = null;
+        let pipelineSteps = [];
+        let editingPipelineId = null;
 
-        // ==================== Utilidades ====================
-        function showTab(tabName) {
-            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
-            document.querySelectorAll('.tabs li').forEach(el => el.classList.remove('is-active'));
-            
-            document.getElementById(`tab-${tabName}`).classList.remove('hidden');
-            document.querySelector(`[data-tab="${tabName}"]`).classList.add('is-active');
-            
-            // Cargar datos según la pestaña
-            if (tabName === 'configs') loadConfigs();
-            if (tabName === 'pipelines') { loadConfigs(); loadPipelines(); }
-            if (tabName === 'execute') { loadPipelinesForExecution(); }
-            if (tabName === 'history') loadHistory();
-            if (tabName === 'stats') loadStatistics();
-        }
+        // ==================== Tab Navigation ====================
+        document.querySelectorAll('.tabs li').forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabId = tab.dataset.tab;
+                document.querySelectorAll('.tabs li').forEach(t => t.classList.remove('is-active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('is-active'));
+                tab.classList.add('is-active');
+                document.getElementById('tab-' + tabId).classList.add('is-active');
+                
+                // Cargar datos según la pestaña
+                if (tabId === 'configs') loadConfigs();
+                if (tabId === 'pipelines') { loadConfigs(); loadPipelines(); }
+                if (tabId === 'execute') { loadImages(); loadPipelinesForExecution(); }
+                if (tabId === 'history') loadHistory();
+                if (tabId === 'reviews') { loadPendingReviews(); loadAccuracyMetrics(); }
+                if (tabId === 'statistics') loadStatistics();
+            });
+        });
 
-        function showLoading(message = 'Procesando...') {
-            document.getElementById('loading-message').textContent = message;
-            document.getElementById('loading-overlay').classList.remove('hidden');
-        }
+        // Upload tab switching
+        document.querySelectorAll('[data-upload-tab]').forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabId = tab.dataset.uploadTab;
+                document.querySelectorAll('[data-upload-tab]').forEach(t => t.classList.remove('is-active'));
+                tab.classList.add('is-active');
+                document.getElementById('upload-single').style.display = tabId === 'single' ? 'block' : 'none';
+                document.getElementById('upload-batch').style.display = tabId === 'batch' ? 'block' : 'none';
+            });
+        });
 
-        function hideLoading() {
-            document.getElementById('loading-overlay').classList.add('hidden');
-        }
-
-        function showNotification(message, type = 'success') {
-            const notification = document.createElement('div');
-            notification.className = `notification is-${type} fade-in`;
-            notification.style.cssText = 'position: fixed; top: 80px; right: 20px; z-index: 1001; max-width: 400px;';
-            notification.innerHTML = `
-                <button class="delete"></button>
-                ${message}
-            `;
-            document.body.appendChild(notification);
-            notification.querySelector('.delete').onclick = () => notification.remove();
-            setTimeout(() => notification.remove(), 5000);
-        }
-
-        function formatNumber(num, decimals = 2) {
-            if (num >= 1000000) return (num / 1000000).toFixed(decimals) + 'M';
-            if (num >= 1000) return (num / 1000).toFixed(decimals) + 'K';
-            return num.toFixed(decimals);
-        }
-
-        function formatDuration(ms) {
-            if (ms < 1000) return ms.toFixed(0) + ' ms';
-            return (ms / 1000).toFixed(2) + ' s';
-        }
-
-        // ==================== API Calls ====================
-        async function apiCall(endpoint, method = 'GET', data = null) {
-            const options = {
-                method,
-                headers: { 'Content-Type': 'application/json' }
-            };
-            if (data) options.body = JSON.stringify(data);
-            
-            const response = await fetch(`/api/${endpoint}`, options);
-            if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.detail || 'Error en la API');
-            }
-            return response.json();
-        }
-
-        // ==================== Configuraciones LLM ====================
+        // ==================== Configs ====================
         async function loadConfigs() {
-            try {
-                const configs = await apiCall('configs');
-                renderConfigsList(configs);
-                renderConfigsSelect(configs);
-            } catch (e) {
-                console.error('Error cargando configs:', e);
-            }
-        }
-
-        function renderConfigsList(configs) {
-            const container = document.getElementById('configs-list');
-            if (configs.length === 0) {
-                container.innerHTML = '<p class="has-text-grey">No hay configuraciones guardadas</p>';
-                return;
-            }
+            const res = await fetch('/api/configs');
+            const configs = await res.json();
             
-            container.innerHTML = configs.map(c => `
-                <div class="step-card">
+            const list = document.getElementById('configs-list');
+            const select = document.getElementById('pipeline-default-llm');
+            
+            list.innerHTML = configs.map(c => `
+                <div class="box">
                     <div class="level">
                         <div class="level-left">
                             <div>
-                                <strong>${c.name}</strong>
-                                <br>
-                                <span class="tag is-info is-light">${c.provider}</span>
-                                <span class="tag is-primary is-light">${c.model}</span>
-                                <br>
-                                <small class="has-text-grey">API Key: ${c.api_key_preview || 'No configurada'}</small>
+                                <p class="title is-5">${c.name}</p>
+                                <p class="subtitle is-6">
+                                    <span class="model-badge">${c.provider}</span>
+                                    ${c.model}
+                                </p>
+                                <p class="is-size-7 has-text-grey">
+                                    API Base: ${c.api_base || 'default'} | 
+                                    Max Tokens: ${c.max_tokens} | 
+                                    Temp: ${c.temperature}
+                                </p>
                             </div>
                         </div>
                         <div class="level-right">
@@ -975,16 +1185,13 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
                 </div>
-            `).join('');
-        }
-
-        function renderConfigsSelect(configs) {
-            const select = document.getElementById('pipeline-llm-config');
-            select.innerHTML = '<option value="">Seleccionar...</option>' +
+            `).join('') || '<p class="has-text-grey">No hay configuraciones guardadas</p>';
+            
+            select.innerHTML = '<option value="">Seleccionar...</option>' + 
                 configs.map(c => `<option value="${c.name}">${c.name} (${c.model})</option>`).join('');
         }
 
-        async function saveConfig() {
+        document.getElementById('btn-save-config').addEventListener('click', async () => {
             const config = {
                 name: document.getElementById('config-name').value,
                 provider: document.getElementById('config-provider').value,
@@ -995,142 +1202,136 @@ HTML_TEMPLATE = """
                 temperature: parseFloat(document.getElementById('config-temperature').value)
             };
             
-            if (!config.name || !config.model) {
-                showNotification('Nombre y modelo son requeridos', 'danger');
-                return;
-            }
+            await fetch('/api/configs', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            });
             
-            try {
-                await apiCall('configs', 'POST', config);
-                showNotification('Configuración guardada correctamente');
-                loadConfigs();
-                // Limpiar formulario
-                document.getElementById('config-name').value = '';
-                document.getElementById('config-api-key').value = '';
-            } catch (e) {
-                showNotification(e.message, 'danger');
-            }
-        }
+            loadConfigs();
+            document.getElementById('config-name').value = '';
+            document.getElementById('config-api-key').value = '';
+        });
 
         async function deleteConfig(name) {
-            if (!confirm(`¿Eliminar configuración "${name}"?`)) return;
-            try {
-                await apiCall(`configs/${encodeURIComponent(name)}`, 'DELETE');
-                showNotification('Configuración eliminada');
+            if (confirm('¿Eliminar esta configuración?')) {
+                await fetch('/api/configs/' + encodeURIComponent(name), {method: 'DELETE'});
                 loadConfigs();
-            } catch (e) {
-                showNotification(e.message, 'danger');
             }
         }
 
         // ==================== Pipelines ====================
-        function addPipelineStep() {
-            stepCounter++;
-            const container = document.getElementById('pipeline-steps-editor');
-            const stepDiv = document.createElement('div');
-            stepDiv.className = 'step-card fade-in';
-            stepDiv.id = `step-${stepCounter}`;
-            stepDiv.innerHTML = `
-                <div class="level mb-2">
-                    <div class="level-left">
-                        <span class="step-number">${container.children.length + 1}</span>
+        function renderPipelineSteps() {
+            const container = document.getElementById('pipeline-steps');
+            container.innerHTML = pipelineSteps.map((step, i) => `
+                <div class="step-card">
+                    <div class="level mb-2">
+                        <div class="level-left">
+                            <span class="tag is-primary">Paso ${i + 1}</span>
+                        </div>
+                        <div class="level-right">
+                            <button class="button is-small is-danger" onclick="removeStep(${i})">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="field">
                         <input class="input is-small" type="text" placeholder="Nombre del paso" 
-                               style="width: 200px;" data-field="name">
+                            value="${step.name}" onchange="updateStep(${i}, 'name', this.value)">
                     </div>
-                    <div class="level-right">
-                        <button class="delete is-small" onclick="removeStep('step-${stepCounter}')"></button>
+                    <div class="field">
+                        <textarea class="textarea is-small" rows="3" placeholder="Prompt (usa $variable para variables JSON)"
+                            onchange="updateStep(${i}, 'prompt', this.value)">${step.prompt}</textarea>
                     </div>
+                    <div class="field">
+                        <label class="label is-small">LLM para este paso (opcional)</label>
+                        <div class="select is-small is-fullwidth">
+                            <select onchange="updateStep(${i}, 'llm_config_name', this.value)">
+                                <option value="">Usar LLM por defecto</option>
+                                ${getConfigOptions(step.llm_config_name)}
+                            </select>
+                        </div>
+                    </div>
+                    <label class="checkbox">
+                        <input type="checkbox" ${step.use_previous_output ? 'checked' : ''} 
+                            onchange="updateStep(${i}, 'use_previous_output', this.checked)">
+                        Usar salida del paso anterior como contexto
+                    </label>
                 </div>
-                <textarea class="textarea prompt-textarea" placeholder="Prompt para este paso..." 
-                          data-field="prompt"></textarea>
-                <label class="checkbox mt-2">
-                    <input type="checkbox" checked data-field="use_previous">
-                    Usar salida del paso anterior como contexto
-                </label>
-            `;
-            container.appendChild(stepDiv);
+            `).join('');
         }
 
-        function removeStep(stepId) {
-            document.getElementById(stepId).remove();
-            // Renumerar pasos
-            const steps = document.querySelectorAll('#pipeline-steps-editor .step-card');
-            steps.forEach((step, i) => {
-                step.querySelector('.step-number').textContent = i + 1;
-            });
+        function getConfigOptions(selected) {
+            const select = document.getElementById('pipeline-default-llm');
+            return Array.from(select.options).slice(1).map(opt => 
+                `<option value="${opt.value}" ${opt.value === selected ? 'selected' : ''}>${opt.text}</option>`
+            ).join('');
         }
 
-        function getStepsFromEditor() {
-            const steps = [];
-            document.querySelectorAll('#pipeline-steps-editor .step-card').forEach(stepDiv => {
-                steps.push({
-                    name: stepDiv.querySelector('[data-field="name"]').value,
-                    prompt: stepDiv.querySelector('[data-field="prompt"]').value,
-                    use_previous_output: stepDiv.querySelector('[data-field="use_previous"]').checked
-                });
-            });
-            return steps;
+        document.getElementById('btn-add-step').addEventListener('click', () => {
+            pipelineSteps.push({name: '', prompt: '', use_previous_output: true, llm_config_name: null});
+            renderPipelineSteps();
+        });
+
+        function removeStep(index) {
+            pipelineSteps.splice(index, 1);
+            renderPipelineSteps();
         }
 
-        async function savePipeline() {
+        function updateStep(index, field, value) {
+            pipelineSteps[index][field] = value;
+        }
+
+        document.getElementById('btn-save-pipeline').addEventListener('click', async () => {
             const pipeline = {
                 name: document.getElementById('pipeline-name').value,
                 description: document.getElementById('pipeline-description').value,
-                llm_config_name: document.getElementById('pipeline-llm-config').value,
-                steps: getStepsFromEditor()
+                default_llm_config_name: document.getElementById('pipeline-default-llm').value,
+                steps: pipelineSteps
             };
             
-            if (!pipeline.name || !pipeline.llm_config_name || pipeline.steps.length === 0) {
-                showNotification('Nombre, configuración LLM y al menos un paso son requeridos', 'danger');
-                return;
-            }
+            const url = editingPipelineId ? '/api/pipelines/' + editingPipelineId : '/api/pipelines';
+            const method = editingPipelineId ? 'PUT' : 'POST';
             
-            try {
-                await apiCall('pipelines', 'POST', pipeline);
-                showNotification('Pipeline guardado correctamente');
-                loadPipelines();
-                // Limpiar formulario
-                document.getElementById('pipeline-name').value = '';
-                document.getElementById('pipeline-description').value = '';
-                document.getElementById('pipeline-steps-editor').innerHTML = '';
-                stepCounter = 0;
-            } catch (e) {
-                showNotification(e.message, 'danger');
-            }
+            await fetch(url, {
+                method: method,
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(pipeline)
+            });
+            
+            loadPipelines();
+            clearPipelineForm();
+        });
+
+        function clearPipelineForm() {
+            document.getElementById('pipeline-name').value = '';
+            document.getElementById('pipeline-description').value = '';
+            document.getElementById('pipeline-default-llm').value = '';
+            pipelineSteps = [];
+            editingPipelineId = null;
+            renderPipelineSteps();
         }
 
         async function loadPipelines() {
-            try {
-                const pipelines = await apiCall('pipelines');
-                renderPipelinesList(pipelines);
-            } catch (e) {
-                console.error('Error cargando pipelines:', e);
-            }
-        }
-
-        function renderPipelinesList(pipelines) {
-            const container = document.getElementById('pipelines-list');
-            if (pipelines.length === 0) {
-                container.innerHTML = '<p class="has-text-grey">No hay pipelines guardados</p>';
-                return;
-            }
+            const res = await fetch('/api/pipelines');
+            const pipelines = await res.json();
             
-            container.innerHTML = pipelines.map(p => `
-                <div class="step-card">
+            document.getElementById('pipelines-list').innerHTML = pipelines.map(p => `
+                <div class="box">
                     <div class="level">
                         <div class="level-left">
                             <div>
-                                <strong>${p.name}</strong>
-                                <br>
-                                <small class="has-text-grey">${p.description || 'Sin descripción'}</small>
-                                <br>
-                                <span class="tag is-primary is-light">${p.llm_model}</span>
-                                <span class="tag is-info is-light">${p.steps_count} pasos</span>
+                                <p class="title is-5">${p.name}</p>
+                                <p class="subtitle is-6">${p.description || 'Sin descripción'}</p>
+                                <p class="is-size-7">
+                                    <span class="tag is-info">${p.steps_count} pasos</span>
+                                    <span class="tag is-light">${p.default_llm_config_name}</span>
+                                </p>
                             </div>
                         </div>
                         <div class="level-right">
-                            <button class="button is-small is-info mr-2" onclick="viewPipeline('${p.id}')">
-                                <i class="fas fa-eye"></i>
+                            <button class="button is-small is-info mr-2" onclick="editPipeline('${p.id}')">
+                                <i class="fas fa-edit"></i>
                             </button>
                             <button class="button is-small is-danger" onclick="deletePipeline('${p.id}')">
                                 <i class="fas fa-trash"></i>
@@ -1138,463 +1339,555 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
                 </div>
-            `).join('');
+            `).join('') || '<p class="has-text-grey">No hay pipelines guardados</p>';
         }
 
-        async function viewPipeline(id) {
-            try {
-                const pipeline = await apiCall(`pipelines/${id}`);
-                alert(JSON.stringify(pipeline, null, 2));
-            } catch (e) {
-                showNotification(e.message, 'danger');
-            }
+        async function editPipeline(id) {
+            const res = await fetch('/api/pipelines/' + id);
+            const pipeline = await res.json();
+            
+            document.getElementById('pipeline-name').value = pipeline.name;
+            document.getElementById('pipeline-description').value = pipeline.description;
+            document.getElementById('pipeline-default-llm').value = pipeline.default_llm_config_name;
+            pipelineSteps = pipeline.steps;
+            editingPipelineId = id;
+            renderPipelineSteps();
         }
 
         async function deletePipeline(id) {
-            if (!confirm('¿Eliminar este pipeline?')) return;
-            try {
-                await apiCall(`pipelines/${id}`, 'DELETE');
-                showNotification('Pipeline eliminado');
+            if (confirm('¿Eliminar este pipeline?')) {
+                await fetch('/api/pipelines/' + id, {method: 'DELETE'});
                 loadPipelines();
-                loadPipelinesForExecution();
-            } catch (e) {
-                showNotification(e.message, 'danger');
             }
         }
 
-        // ==================== Ejecución ====================
-        async function loadPipelinesForExecution() {
-            try {
-                const pipelines = await apiCall('pipelines');
-                renderPipelineCheckboxes(pipelines);
-            } catch (e) {
-                console.error('Error:', e);
-            }
-        }
+        // ==================== Images ====================
+        document.getElementById('image-file').addEventListener('change', (e) => {
+            document.getElementById('image-file-name').textContent = e.target.files[0]?.name || 'Ningún archivo';
+        });
 
-        function renderPipelineCheckboxes(pipelines) {
-            const container = document.getElementById('pipeline-checkboxes');
-            if (pipelines.length === 0) {
-                container.innerHTML = '<p class="has-text-grey">No hay pipelines. Crea uno primero.</p>';
-                return;
-            }
+        document.getElementById('batch-files').addEventListener('change', (e) => {
+            const count = e.target.files.length;
+            document.getElementById('batch-file-name').textContent = count > 0 ? `${count} archivos seleccionados` : 'Ningún archivo';
+        });
+
+        document.getElementById('btn-upload-single').addEventListener('click', async () => {
+            const file = document.getElementById('image-file').files[0];
+            if (!file) return alert('Selecciona una imagen');
             
-            container.innerHTML = pipelines.map(p => `
-                <label class="checkbox is-block mb-2">
-                    <input type="checkbox" value="${p.id}" onchange="togglePipeline('${p.id}')">
-                    <strong>${p.name}</strong>
-                    <br>
-                    <small class="has-text-grey ml-4">${p.llm_model} - ${p.steps_count} pasos</small>
-                </label>
-            `).join('');
-        }
-
-        function togglePipeline(id) {
-            if (selectedPipelines.has(id)) {
-                selectedPipelines.delete(id);
-            } else {
-                selectedPipelines.add(id);
-            }
-            updateExecuteButton();
-        }
-
-        function updateExecuteButton() {
-            const btn = document.getElementById('btn-execute');
-            btn.disabled = !currentImagePath || selectedPipelines.size === 0;
-        }
-
-        async function uploadImage(file) {
             const formData = new FormData();
             formData.append('file', file);
             
-            showLoading('Subiendo imagen...');
-            try {
-                const response = await fetch('/api/images/upload', {
-                    method: 'POST',
-                    body: formData
-                });
-                const data = await response.json();
-                
-                currentImagePath = data.path;
-                document.getElementById('current-image-path').value = data.path;
-                document.getElementById('image-filename').textContent = file.name;
-                
-                // Mostrar preview
-                const preview = document.getElementById('image-preview');
-                preview.src = `/api/images/view/${file.name}`;
-                preview.classList.remove('hidden');
-                
-                updateExecuteButton();
-                showNotification('Imagen subida correctamente');
-            } catch (e) {
-                showNotification('Error subiendo imagen: ' + e.message, 'danger');
-            } finally {
-                hideLoading();
+            const contextJson = document.getElementById('context-json').value.trim();
+            if (contextJson) {
+                try {
+                    JSON.parse(contextJson);
+                    formData.append('context_json', contextJson);
+                } catch (e) {
+                    return alert('JSON de contexto inválido');
+                }
             }
-        }
+            
+            await fetch('/api/images/upload', {method: 'POST', body: formData});
+            loadImages();
+            document.getElementById('image-file').value = '';
+            document.getElementById('image-file-name').textContent = 'Ningún archivo';
+            document.getElementById('context-json').value = '';
+        });
 
-        async function executeComparison() {
-            if (!currentImagePath || selectedPipelines.size === 0) return;
+        document.getElementById('btn-upload-batch').addEventListener('click', async () => {
+            const files = document.getElementById('batch-files').files;
+            if (files.length === 0) return alert('Selecciona archivos');
             
-            showLoading('Iniciando ejecución...');
-            
-            try {
-                const response = await apiCall('execute', 'POST', {
-                    pipeline_ids: Array.from(selectedPipelines),
-                    image_path: currentImagePath
-                });
-                
-                const executionId = response.execution_id;
-                
-                // Polling para estado
-                const checkStatus = async () => {
-                    const status = await apiCall(`execute/${executionId}/status`);
-                    document.getElementById('loading-message').textContent = status.progress;
-                    
-                    if (status.status === 'completed') {
-                        hideLoading();
-                        renderExecutionResults(status);
-                        showNotification('Ejecución completada');
-                    } else if (status.status === 'error') {
-                        hideLoading();
-                        showNotification('Error: ' + status.error, 'danger');
-                    } else {
-                        setTimeout(checkStatus, 1000);
-                    }
-                };
-                
-                checkStatus();
-            } catch (e) {
-                hideLoading();
-                showNotification('Error: ' + e.message, 'danger');
+            const formData = new FormData();
+            for (let file of files) {
+                formData.append('files', file);
             }
-        }
+            
+            await fetch('/api/images/upload-batch', {method: 'POST', body: formData});
+            loadImages();
+            document.getElementById('batch-files').value = '';
+            document.getElementById('batch-file-name').textContent = 'Ningún archivo';
+        });
 
-        function renderExecutionResults(status) {
-            const container = document.getElementById('execution-results');
-            const results = status.results;
-            const report = status.report;
+        async function loadImages() {
+            const res = await fetch('/api/images');
+            const images = await res.json();
             
-            if (!results || results.length === 0) {
-                container.innerHTML = '<p class="has-text-grey">No hay resultados</p>';
-                return;
-            }
-            
-            // Tabla comparativa
-            let html = `
-                <h4 class="title is-5 mb-4">Comparación de Rendimiento</h4>
-                <table class="table is-fullwidth comparison-table">
-                    <thead>
-                        <tr>
-                            <th>Pipeline</th>
-                            <th>Latencia</th>
-                            <th>Tokens</th>
-                            <th>Costo Est.</th>
-                            <th>Estado</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-            `;
-            
-            results.forEach(r => {
-                const isFastest = report.fastest === r.pipeline_name;
-                const isCheapest = report.cheapest === r.pipeline_name;
-                
-                html += `
-                    <tr>
-                        <td><strong>${r.pipeline_name}</strong></td>
-                        <td class="${isFastest ? 'best' : ''}">${formatDuration(r.total_latency_ms)}</td>
-                        <td>${formatNumber(r.total_tokens, 0)}</td>
-                        <td class="${isCheapest ? 'best' : ''}">$${r.total_cost.toFixed(6)}</td>
-                        <td>
-                            ${r.success 
-                                ? '<span class="tag is-success">Éxito</span>' 
-                                : '<span class="tag is-danger">Error</span>'}
-                        </td>
-                    </tr>
-                `;
-            });
-            
-            html += '</tbody></table>';
-            
-            // Leyenda
-            if (report.fastest || report.cheapest) {
-                html += '<p class="is-size-7 has-text-grey mt-2">';
-                if (report.fastest) html += `<span class="tag is-success is-light mr-2">Más rápido: ${report.fastest}</span>`;
-                if (report.cheapest) html += `<span class="tag is-info is-light">Más económico: ${report.cheapest}</span>`;
-                html += '</p>';
-            }
-            
-            // Resultados detallados
-            html += '<hr><h4 class="title is-5 mb-4">Resultados Detallados</h4>';
-            
-            results.forEach(r => {
-                html += `
-                    <div class="step-card result-card ${r.success ? '' : 'error'} mb-4">
-                        <h5 class="title is-6">${r.pipeline_name}</h5>
-                `;
-                
-                r.step_results.forEach((step, i) => {
-                    html += `
-                        <div class="mb-3">
-                            <p><span class="step-number">${i + 1}</span><strong>${step.step_name}</strong></p>
-                            <div class="tags mt-1">
-                                <span class="tag is-light">${formatDuration(step.latency_ms)}</span>
-                                <span class="tag is-light">${step.total_tokens} tokens</span>
+            document.getElementById('images-list').innerHTML = images.map(img => `
+                <div class="box is-clickable" onclick="selectImage('${img.name}', ${img.has_context})">
+                    <div class="level">
+                        <div class="level-left">
+                            <div>
+                                <p class="has-text-weight-bold">${img.name}</p>
+                                <p class="is-size-7 has-text-grey">
+                                    ${(img.size / 1024).toFixed(1)} KB
+                                    ${img.has_context ? '<span class="tag is-success is-light ml-2">JSON</span>' : ''}
+                                </p>
                             </div>
-                            <div class="response-content mt-2">${step.content || step.error || 'Sin respuesta'}</div>
                         </div>
-                    `;
-                });
-                
-                html += '</div>';
-            });
-            
-            container.innerHTML = html;
+                    </div>
+                </div>
+            `).join('') || '<p class="has-text-grey">No hay imágenes</p>';
         }
 
-        // ==================== Historial ====================
+        async function selectImage(name, hasContext) {
+            selectedImage = name;
+            document.getElementById('selected-image').value = name;
+            document.getElementById('selected-image-preview').style.display = 'block';
+            document.getElementById('preview-img').src = '/api/images/view/' + name;
+            
+            if (hasContext) {
+                const res = await fetch('/api/images/' + name + '/context');
+                const data = await res.json();
+                selectedImageContext = data.context_data;
+                document.getElementById('selected-context-preview').style.display = 'block';
+                document.getElementById('context-preview-content').textContent = JSON.stringify(data.context_data, null, 2);
+            } else {
+                selectedImageContext = null;
+                document.getElementById('selected-context-preview').style.display = 'none';
+            }
+        }
+
+        // ==================== Execution ====================
+        async function loadPipelinesForExecution() {
+            const res = await fetch('/api/pipelines');
+            const pipelines = await res.json();
+            
+            document.getElementById('pipeline-checkboxes').innerHTML = pipelines.map(p => `
+                <label class="checkbox is-block mb-2">
+                    <input type="checkbox" value="${p.id}" class="pipeline-checkbox">
+                    ${p.name} <span class="tag is-light">${p.steps_count} pasos</span>
+                </label>
+            `).join('') || '<p class="has-text-grey">No hay pipelines</p>';
+        }
+
+        document.getElementById('btn-execute').addEventListener('click', async () => {
+            if (!selectedImage) return alert('Selecciona una imagen');
+            
+            const selectedPipelines = Array.from(document.querySelectorAll('.pipeline-checkbox:checked'))
+                .map(cb => cb.value);
+            
+            if (selectedPipelines.length === 0) return alert('Selecciona al menos un pipeline');
+            
+            document.getElementById('results-card').style.display = 'block';
+            document.getElementById('execution-progress').style.display = 'block';
+            document.getElementById('execution-results').innerHTML = '';
+            
+            const res = await fetch('/api/execute', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    pipeline_ids: selectedPipelines,
+                    image_name: selectedImage,
+                    context_data: selectedImageContext
+                })
+            });
+            
+            const {execution_id} = await res.json();
+            pollExecutionStatus(execution_id);
+        });
+
+        async function pollExecutionStatus(executionId) {
+            const interval = setInterval(async () => {
+                const res = await fetch('/api/execute/' + executionId + '/status');
+                const status = await res.json();
+                
+                document.getElementById('progress-text').textContent = status.progress || 'Procesando...';
+                
+                if (status.status === 'completed') {
+                    clearInterval(interval);
+                    document.getElementById('execution-progress').style.display = 'none';
+                    renderExecutionResults(status.results, status.report);
+                    loadStatistics();
+                } else if (status.status === 'error') {
+                    clearInterval(interval);
+                    document.getElementById('execution-progress').style.display = 'none';
+                    document.getElementById('execution-results').innerHTML = `
+                        <div class="notification is-danger">${status.error}</div>
+                    `;
+                }
+            }, 1000);
+        }
+
+        function renderExecutionResults(results, report) {
+            let html = '';
+            
+            if (report) {
+                html += `
+                    <div class="notification is-info is-light mb-4">
+                        <p><strong>Resumen:</strong></p>
+                        <p>Más rápido: <strong>${report.fastest || 'N/A'}</strong></p>
+                        <p>Más económico: <strong>${report.cheapest || 'N/A'}</strong></p>
+                        <p>Menos tokens: <strong>${report.least_tokens || 'N/A'}</strong></p>
+                    </div>
+                `;
+            }
+            
+            for (const result of results) {
+                html += `
+                    <div class="box execution-card ${result.success ? 'success' : 'error'}">
+                        <div class="level">
+                            <div class="level-left">
+                                <div>
+                                    <p class="title is-5">${result.pipeline_name}</p>
+                                    <p class="is-size-7">
+                                        ${result.models_used.map(m => `<span class="model-badge">${m}</span>`).join('')}
+                                    </p>
+                                </div>
+                            </div>
+                            <div class="level-right">
+                                <div class="has-text-right">
+                                    <p><strong>${result.total_latency_ms.toFixed(0)}ms</strong></p>
+                                    <p class="is-size-7">${result.total_tokens} tokens | $${result.total_cost.toFixed(4)}</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-3">
+                            ${result.step_results.map((step, i) => `
+                                <div class="step-result-card">
+                                    <div class="step-header">
+                                        <div>
+                                            <span class="tag is-primary">Paso ${i+1}</span>
+                                            <strong class="ml-2">${step.step_name}</strong>
+                                            <span class="model-badge ml-2">${step.model_used}</span>
+                                        </div>
+                                        <div class="is-size-7">
+                                            ${step.latency_ms.toFixed(0)}ms | ${step.total_tokens} tokens
+                                        </div>
+                                    </div>
+                                    <details>
+                                        <summary class="is-size-7 has-text-grey">Ver prompt usado</summary>
+                                        <pre class="prompt-preview mt-2">${escapeHtml(step.prompt_used)}</pre>
+                                    </details>
+                                    <div class="content mt-2">
+                                        <pre style="white-space: pre-wrap; background: #f5f5f5; padding: 0.75rem; border-radius: 4px;">${escapeHtml(step.content)}</pre>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+            
+            document.getElementById('execution-results').innerHTML = html;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // ==================== History ====================
         async function loadHistory() {
-            try {
-                const history = await apiCall('history?limit=50');
-                renderHistory(history);
-            } catch (e) {
-                console.error('Error:', e);
-            }
+            const res = await fetch('/api/history?limit=50');
+            const history = await res.json();
+            
+            document.getElementById('history-list').innerHTML = history.map(h => `
+                <div class="box execution-card ${h.success ? 'success' : 'error'} is-clickable" 
+                     onclick="showExecutionDetail('${h.id}')">
+                    <div class="level">
+                        <div class="level-left">
+                            <div>
+                                <p class="has-text-weight-bold">${h.pipeline_name}</p>
+                                <p class="is-size-7 has-text-grey">${h.image_name}</p>
+                                <p class="is-size-7">
+                                    ${h.models_used.map(m => `<span class="model-badge">${m}</span>`).join('')}
+                                    ${h.review_status === 'reviewed' ? '<span class="tag is-success ml-2">Revisado</span>' : 
+                                      h.review_status === 'pending' ? '<span class="tag is-warning ml-2">Pendiente</span>' : ''}
+                                </p>
+                            </div>
+                        </div>
+                        <div class="level-right">
+                            <div class="has-text-right">
+                                <p><strong>${h.total_latency_ms.toFixed(0)}ms</strong></p>
+                                <p class="is-size-7">${h.total_tokens} tokens | $${h.total_cost.toFixed(4)}</p>
+                                <p class="is-size-7 has-text-grey">${new Date(h.started_at).toLocaleString()}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `).join('') || '<p class="has-text-grey">No hay historial</p>';
+            
+            // Update counter
+            document.getElementById('total-executions').textContent = history.length;
         }
 
-        function renderHistory(history) {
-            const container = document.getElementById('history-list');
-            if (history.length === 0) {
-                container.innerHTML = '<p class="has-text-grey">No hay ejecuciones en el historial</p>';
-                return;
-            }
+        async function showExecutionDetail(id) {
+            const res = await fetch('/api/history/' + id);
+            const detail = await res.json();
             
-            container.innerHTML = `
-                <table class="table is-fullwidth is-hoverable">
-                    <thead>
-                        <tr>
-                            <th>Fecha</th>
-                            <th>Pipeline</th>
-                            <th>Latencia</th>
-                            <th>Tokens</th>
-                            <th>Costo</th>
-                            <th>Estado</th>
-                            <th>Acciones</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${history.map(h => `
-                            <tr>
-                                <td>${new Date(h.started_at).toLocaleString()}</td>
-                                <td><strong>${h.pipeline_name}</strong></td>
-                                <td>${formatDuration(h.total_latency_ms)}</td>
-                                <td>${formatNumber(h.total_tokens, 0)}</td>
-                                <td>$${h.total_cost.toFixed(6)}</td>
-                                <td>
-                                    ${h.success 
-                                        ? '<span class="tag is-success is-light">Éxito</span>' 
-                                        : '<span class="tag is-danger is-light">Error</span>'}
-                                </td>
-                                <td>
-                                    <button class="button is-small is-info" onclick="viewExecutionDetails('${h.id}')">
-                                        <i class="fas fa-eye"></i>
-                                    </button>
-                                    <button class="button is-small is-danger" onclick="deleteExecution('${h.id}')">
-                                        <i class="fas fa-trash"></i>
-                                    </button>
-                                </td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
+            document.getElementById('execution-detail-card').style.display = 'block';
+            document.getElementById('execution-detail-content').innerHTML = `
+                <div class="columns">
+                    <div class="column is-4">
+                        <img src="/api/images/view/${detail.image_name}" class="image-preview">
+                    </div>
+                    <div class="column">
+                        <p><strong>Pipeline:</strong> ${detail.pipeline_name}</p>
+                        <p><strong>Imagen:</strong> ${detail.image_name}</p>
+                        <p><strong>Latencia:</strong> ${detail.total_latency_ms.toFixed(0)}ms</p>
+                        <p><strong>Tokens:</strong> ${detail.total_input_tokens} in / ${detail.total_output_tokens} out</p>
+                        <p><strong>Costo:</strong> $${detail.total_cost.toFixed(4)}</p>
+                        ${detail.context_data ? `
+                            <p class="mt-2"><strong>Contexto:</strong></p>
+                            <pre class="context-preview">${JSON.stringify(detail.context_data, null, 2)}</pre>
+                        ` : ''}
+                    </div>
+                </div>
+                
+                <h4 class="title is-5 mt-4">Pasos</h4>
+                ${detail.step_results.map((step, i) => `
+                    <div class="step-result-card">
+                        <div class="step-header">
+                            <div>
+                                <span class="tag is-primary">Paso ${i+1}</span>
+                                <strong class="ml-2">${step.step_name}</strong>
+                                <span class="model-badge ml-2">${step.provider_used}:${step.model_used}</span>
+                            </div>
+                            <div class="is-size-7">
+                                ${step.latency_ms.toFixed(0)}ms | ${step.input_tokens}/${step.output_tokens} tokens | $${step.cost_estimate.toFixed(4)}
+                            </div>
+                        </div>
+                        <details>
+                            <summary class="is-size-7 has-text-grey">Ver prompt</summary>
+                            <pre class="prompt-preview mt-2">${escapeHtml(step.prompt_used)}</pre>
+                        </details>
+                        <div class="content mt-2">
+                            <pre style="white-space: pre-wrap; background: #f5f5f5; padding: 0.75rem; border-radius: 4px;">${escapeHtml(step.content)}</pre>
+                        </div>
+                    </div>
+                `).join('')}
             `;
         }
 
-        async function viewExecutionDetails(id) {
-            try {
-                const details = await apiCall(`history/${id}`);
-                const modal = document.getElementById('execution-detail-modal');
-                const content = document.getElementById('execution-detail-content');
-                
-                let html = `
-                    <div class="columns">
-                        <div class="column is-4">
-                            <p><strong>Pipeline:</strong> ${details.pipeline_name}</p>
-                            <p><strong>Fecha:</strong> ${new Date(details.started_at).toLocaleString()}</p>
-                            <p><strong>Duración:</strong> ${formatDuration(details.total_latency_ms)}</p>
-                            <p><strong>Tokens totales:</strong> ${formatNumber(details.total_tokens, 0)}</p>
-                            <p><strong>Costo estimado:</strong> $${details.total_cost.toFixed(6)}</p>
-                        </div>
-                        <div class="column is-8">
-                            <h5 class="title is-6">Resultados por Paso</h5>
-                `;
-                
-                details.step_results.forEach((step, i) => {
-                    html += `
-                        <div class="step-card mb-3">
-                            <p><span class="step-number">${i + 1}</span><strong>${step.step_name}</strong></p>
-                            <div class="tags mt-1">
-                                <span class="tag is-light">${formatDuration(step.latency_ms)}</span>
-                                <span class="tag is-light">${step.total_tokens} tokens</span>
-                                <span class="tag is-light">$${step.cost_estimate.toFixed(6)}</span>
+        document.getElementById('close-detail').addEventListener('click', () => {
+            document.getElementById('execution-detail-card').style.display = 'none';
+        });
+
+        document.getElementById('btn-clear-history').addEventListener('click', async () => {
+            if (confirm('¿Eliminar todo el historial?')) {
+                await fetch('/api/history', {method: 'DELETE'});
+                loadHistory();
+            }
+        });
+
+        // ==================== Reviews ====================
+        async function loadPendingReviews() {
+            const res = await fetch('/api/history?review_status=pending&limit=50');
+            const pending = await res.json();
+            
+            document.getElementById('pending-reviews-list').innerHTML = pending.map(h => `
+                <div class="box is-clickable" onclick="showReviewDetail('${h.id}')">
+                    <div class="level">
+                        <div class="level-left">
+                            <div>
+                                <p class="has-text-weight-bold">${h.pipeline_name}</p>
+                                <p class="is-size-7">${h.image_name} | ${h.steps_count} pasos</p>
                             </div>
-                            <div class="response-content mt-2">${step.content || step.error || 'Sin respuesta'}</div>
+                        </div>
+                        <div class="level-right">
+                            <span class="tag is-warning">Pendiente</span>
+                        </div>
+                    </div>
+                </div>
+            `).join('') || '<p class="has-text-grey">No hay ejecuciones pendientes de revisión</p>';
+        }
+
+        async function showReviewDetail(id) {
+            const res = await fetch('/api/history/' + id);
+            const detail = await res.json();
+            
+            document.getElementById('review-detail-card').style.display = 'block';
+            document.getElementById('review-detail-content').innerHTML = `
+                <div class="columns">
+                    <div class="column is-4">
+                        <img src="/api/images/view/${detail.image_name}" class="image-preview">
+                    </div>
+                    <div class="column">
+                        <p><strong>Pipeline:</strong> ${detail.pipeline_name}</p>
+                        <p><strong>Imagen:</strong> ${detail.image_name}</p>
+                    </div>
+                </div>
+                
+                <h4 class="title is-5 mt-4">Revisar Pasos</h4>
+                ${detail.step_results.map((step, i) => {
+                    const reviewed = detail.step_reviews && detail.step_reviews[step.step_id] !== undefined;
+                    const isCorrect = detail.step_reviews && detail.step_reviews[step.step_id];
+                    return `
+                        <div class="step-result-card" id="review-step-${step.step_id}">
+                            <div class="step-header">
+                                <div>
+                                    <span class="tag is-primary">Paso ${i+1}</span>
+                                    <strong class="ml-2">${step.step_name}</strong>
+                                    <span class="model-badge ml-2">${step.model_used}</span>
+                                </div>
+                                <div>
+                                    <button class="button is-small review-btn ${reviewed && isCorrect ? 'correct' : ''}" 
+                                            onclick="reviewStep('${id}', '${step.step_id}', true)">
+                                        <i class="fas fa-check"></i> Correcto
+                                    </button>
+                                    <button class="button is-small review-btn ${reviewed && !isCorrect ? 'incorrect' : ''}"
+                                            onclick="reviewStep('${id}', '${step.step_id}', false)">
+                                        <i class="fas fa-times"></i> Incorrecto
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="content mt-2">
+                                <pre style="white-space: pre-wrap; background: #f5f5f5; padding: 0.75rem; border-radius: 4px;">${escapeHtml(step.content)}</pre>
+                            </div>
                         </div>
                     `;
-                });
-                
-                html += '</div></div>';
-                content.innerHTML = html;
-                modal.classList.add('is-active');
-            } catch (e) {
-                showNotification('Error cargando detalles: ' + e.message, 'danger');
-            }
-        }
-
-        async function deleteExecution(id) {
-            if (!confirm('¿Eliminar esta ejecución del historial?')) return;
-            try {
-                await apiCall(`history/${id}`, 'DELETE');
-                showNotification('Ejecución eliminada');
-                loadHistory();
-            } catch (e) {
-                showNotification(e.message, 'danger');
-            }
-        }
-
-        async function clearHistory() {
-            if (!confirm('¿Eliminar todo el historial?')) return;
-            try {
-                await apiCall('history', 'DELETE');
-                showNotification('Historial limpiado');
-                loadHistory();
-            } catch (e) {
-                showNotification(e.message, 'danger');
-            }
-        }
-
-        // ==================== Estadísticas ====================
-        async function loadStatistics() {
-            try {
-                const stats = await apiCall('statistics');
-                renderStatistics(stats);
-            } catch (e) {
-                console.error('Error:', e);
-            }
-        }
-
-        function renderStatistics(stats) {
-            const overview = document.getElementById('stats-overview');
-            overview.innerHTML = `
-                <div class="metric-box">
-                    <div class="metric-value">${stats.total_executions}</div>
-                    <div class="metric-label">Ejecuciones Totales</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-value">${stats.success_rate.toFixed(1)}%</div>
-                    <div class="metric-label">Tasa de Éxito</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-value">${formatNumber(stats.total_tokens, 0)}</div>
-                    <div class="metric-label">Tokens Totales</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-value">$${stats.total_cost.toFixed(4)}</div>
-                    <div class="metric-label">Costo Total</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-value">${formatDuration(stats.avg_latency_ms)}</div>
-                    <div class="metric-label">Latencia Promedio</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-value">${stats.pipelines_count}</div>
-                    <div class="metric-label">Pipelines</div>
-                </div>
+                }).join('')}
             `;
+        }
+
+        async function reviewStep(executionId, stepId, isCorrect) {
+            await fetch('/api/reviews', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    execution_id: executionId,
+                    step_id: stepId,
+                    is_correct: isCorrect
+                })
+            });
             
-            // Estadísticas por pipeline
-            const pipelineStats = document.getElementById('pipeline-stats');
-            const pipelines = Object.values(stats.pipeline_stats);
+            // Refresh
+            showReviewDetail(executionId);
+            loadPendingReviews();
+            loadAccuracyMetrics();
+        }
+
+        async function loadAccuracyMetrics() {
+            const res = await fetch('/api/reviews/statistics');
+            const stats = await res.json();
             
-            if (pipelines.length === 0) {
-                pipelineStats.innerHTML = '<p class="has-text-grey">No hay datos de pipelines</p>';
+            if (stats.message) {
+                document.getElementById('accuracy-metrics').innerHTML = `<p class="has-text-grey">${stats.message}</p>`;
                 return;
             }
             
-            pipelineStats.innerHTML = `
-                <table class="table is-fullwidth">
-                    <thead>
-                        <tr>
-                            <th>Pipeline</th>
-                            <th>Ejecuciones</th>
-                            <th>Tokens</th>
-                            <th>Costo</th>
-                            <th>Latencia Total</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${pipelines.map(p => `
-                            <tr>
-                                <td><strong>${p.name}</strong></td>
-                                <td>${p.executions}</td>
-                                <td>${formatNumber(p.tokens, 0)}</td>
-                                <td>$${p.cost.toFixed(4)}</td>
-                                <td>${formatDuration(p.latency)}</td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
+            let html = `<p class="mb-3"><strong>Total revisadas:</strong> ${stats.total_reviewed}</p>`;
+            
+            html += '<h5 class="title is-6">Por Pipeline</h5>';
+            for (const [pid, data] of Object.entries(stats.pipeline_accuracy)) {
+                html += `
+                    <div class="mb-3">
+                        <p class="has-text-weight-bold">${data.name}</p>
+                        <div class="accuracy-bar">
+                            <div class="fill" style="width: ${data.step_accuracy_pct}%"></div>
+                        </div>
+                        <p class="is-size-7">${data.step_accuracy_pct}% precisión por paso | ${data.execution_accuracy_pct}% ejecuciones perfectas</p>
+                    </div>
+                `;
+            }
+            
+            html += '<h5 class="title is-6 mt-4">Por Modelo</h5>';
+            for (const [model, data] of Object.entries(stats.model_accuracy)) {
+                html += `
+                    <div class="mb-3">
+                        <p class="has-text-weight-bold">${model}</p>
+                        <div class="accuracy-bar">
+                            <div class="fill" style="width: ${data.accuracy_pct}%"></div>
+                        </div>
+                        <p class="is-size-7">${data.accuracy_pct}% precisión (${data.correct_steps}/${data.total_steps} pasos)</p>
+                    </div>
+                `;
+            }
+            
+            document.getElementById('accuracy-metrics').innerHTML = html;
+        }
+
+        // ==================== Statistics ====================
+        async function loadStatistics() {
+            const res = await fetch('/api/statistics');
+            const stats = await res.json();
+            
+            document.getElementById('stats-summary').innerHTML = `
+                <div class="column">
+                    <div class="metric-box">
+                        <p class="value">${stats.total_executions}</p>
+                        <p class="label">Ejecuciones</p>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="metric-box">
+                        <p class="value">${stats.success_rate.toFixed(1)}%</p>
+                        <p class="label">Tasa de Éxito</p>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="metric-box">
+                        <p class="value">${(stats.total_tokens / 1000).toFixed(1)}K</p>
+                        <p class="label">Tokens Totales</p>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="metric-box">
+                        <p class="value">$${stats.total_cost.toFixed(2)}</p>
+                        <p class="label">Costo Total</p>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="metric-box">
+                        <p class="value">${stats.avg_latency_ms.toFixed(0)}ms</p>
+                        <p class="label">Latencia Promedio</p>
+                    </div>
+                </div>
             `;
             
-            // Actualizar badge
+            // Pipeline stats
+            let pipelineHtml = '';
+            for (const [pid, data] of Object.entries(stats.pipeline_stats)) {
+                pipelineHtml += `
+                    <div class="box">
+                        <p class="has-text-weight-bold">${data.name}</p>
+                        <p class="is-size-7">
+                            ${data.executions} ejecuciones | 
+                            ${data.tokens} tokens | 
+                            $${data.cost.toFixed(4)} | 
+                            ${(data.latency / data.executions).toFixed(0)}ms avg
+                            ${data.accuracy !== null ? ` | ${data.accuracy}% precisión` : ''}
+                        </p>
+                    </div>
+                `;
+            }
+            document.getElementById('pipeline-stats').innerHTML = pipelineHtml || '<p class="has-text-grey">Sin datos</p>';
+            
+            // Model stats
+            let modelHtml = '';
+            for (const [model, data] of Object.entries(stats.model_stats)) {
+                modelHtml += `
+                    <div class="box">
+                        <p class="has-text-weight-bold">${model}</p>
+                        <p class="is-size-7">${data.executions} usos</p>
+                    </div>
+                `;
+            }
+            document.getElementById('model-stats').innerHTML = modelHtml || '<p class="has-text-grey">Sin datos</p>';
+            
+            // Update counter
             document.getElementById('total-executions').textContent = stats.total_executions;
         }
 
-        // ==================== Event Listeners ====================
-        document.addEventListener('DOMContentLoaded', () => {
-            // Tabs
-            document.querySelectorAll('.tabs li').forEach(tab => {
-                tab.addEventListener('click', () => showTab(tab.dataset.tab));
-            });
-            
-            // Image upload
-            document.getElementById('image-upload').addEventListener('change', (e) => {
-                if (e.target.files.length > 0) {
-                    uploadImage(e.target.files[0]);
-                }
-            });
-            
-            // Buttons
-            document.getElementById('btn-save-config').addEventListener('click', saveConfig);
-            document.getElementById('btn-add-step').addEventListener('click', addPipelineStep);
-            document.getElementById('btn-save-pipeline').addEventListener('click', savePipeline);
-            document.getElementById('btn-execute').addEventListener('click', executeComparison);
-            document.getElementById('btn-clear-history').addEventListener('click', clearHistory);
-            
-            // Modal close
-            document.querySelectorAll('.modal .delete, .modal-background').forEach(el => {
-                el.addEventListener('click', () => {
-                    document.querySelectorAll('.modal').forEach(m => m.classList.remove('is-active'));
-                });
-            });
-            
-            // Cargar datos iniciales
-            loadPipelinesForExecution();
-            loadStatistics();
-        });
+        // ==================== Init ====================
+        loadConfigs();
+        loadImages();
+        loadPipelinesForExecution();
+        loadStatistics();
     </script>
 </body>
 </html>
 """
 
-
 @app.get("/", response_class=HTMLResponse)
-async def root():
-    """Página principal"""
+async def index():
     return HTML_TEMPLATE
 
+# ==================== Main ====================
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
