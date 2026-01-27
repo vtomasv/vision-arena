@@ -1124,10 +1124,11 @@ HTML_TEMPLATE = """
         let editingPipelineId = null;
 
         // ==================== Tab Navigation ====================
-        document.querySelectorAll('.tabs li').forEach(tab => {
+        document.querySelectorAll('.tabs.is-boxed li[data-tab]').forEach(tab => {
             tab.addEventListener('click', () => {
                 const tabId = tab.dataset.tab;
-                document.querySelectorAll('.tabs li').forEach(t => t.classList.remove('is-active'));
+                if (!tabId) return; // Ignorar si no tiene data-tab
+                document.querySelectorAll('.tabs.is-boxed li[data-tab]').forEach(t => t.classList.remove('is-active'));
                 document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('is-active'));
                 tab.classList.add('is-active');
                 document.getElementById('tab-' + tabId).classList.add('is-active');
