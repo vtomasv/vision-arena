@@ -742,10 +742,10 @@ HTML_TEMPLATE = """
                             <div class="tabs is-small is-toggle">
                                 <ul>
                                     <li class="is-active" data-upload-tab="single">
-                                        <a>Imagen Individual</a>
+                                        <a href="javascript:void(0)">Imagen Individual</a>
                                     </li>
                                     <li data-upload-tab="batch">
-                                        <a>Batch (Múltiples)</a>
+                                        <a href="javascript:void(0)">Batch (Múltiples)</a>
                                     </li>
                                 </ul>
                             </div>
@@ -1144,7 +1144,9 @@ HTML_TEMPLATE = """
 
         // Upload tab switching
         document.querySelectorAll('[data-upload-tab]').forEach(tab => {
-            tab.addEventListener('click', () => {
+            tab.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
                 const tabId = tab.dataset.uploadTab;
                 document.querySelectorAll('[data-upload-tab]').forEach(t => t.classList.remove('is-active'));
                 tab.classList.add('is-active');
