@@ -2,12 +2,34 @@
 
 Una aplicación Python con interfaz gráfica web para comparar LLMs visuales mediante pipelines configurables. Permite evaluar diferentes modelos de visión procesando imágenes y comparando sus resultados en términos de calidad, tiempo, tokens y costo.
 
+## Screenshots
+
+### Pantalla Principal - Ejecutar
+![Execute Tab](docs/screenshots/01_execute_tab.png)
+*Interfaz principal para subir imágenes y ejecutar comparaciones de pipelines.*
+
+### Configuración de Pipelines
+![Pipelines Tab](docs/screenshots/02_pipelines_tab.png)
+*Creación y gestión de pipelines con múltiples pasos de análisis.*
+
+### Configuración de LLMs
+![LLM Config Tab](docs/screenshots/03_llm_config_tab.png)
+*Configuración de proveedores de LLM (OpenAI, Anthropic, Google, Ollama) con parámetros avanzados.*
+
+### Historial de Ejecuciones
+![History Tab](docs/screenshots/04_history_tab.png)
+*Historial completo de todas las ejecuciones con opción de generar reportes PDF forenses.*
+
+### Estadísticas y Métricas
+![Statistics Tab](docs/screenshots/05_statistics_tab.png)
+*Dashboard con métricas de rendimiento, costos y estadísticas por pipeline y modelo.*
+
 ## Características Principales
 
 ### Soporte Multi-Proveedor
-- **OpenAI**: GPT-4o, GPT-4o-mini, GPT-4 Turbo
+- **OpenAI**: GPT-4o, GPT-4o-mini, GPT-4 Turbo, GPT-5
 - **Anthropic**: Claude 3.5 Sonnet, Claude 3 Opus, Claude 3 Haiku
-- **Google**: Gemini Pro Vision, Gemini 1.5
+- **Google**: Gemini Pro Vision, Gemini 1.5, Gemini 2.0
 - **Ollama**: Modelos locales (LLaVA, Llama Vision, etc.)
 - **OpenAI Compatible**: Cualquier API compatible
 
@@ -21,6 +43,12 @@ Una aplicación Python con interfaz gráfica web para comparar LLMs visuales med
 - Procesa múltiples imágenes con un solo pipeline
 - Asocia archivos JSON de contexto a cada imagen
 - Reportes agregados de batch
+
+### Reportes PDF Forenses
+- Genera reportes PDF firmados con hash SHA-256
+- Incluye imagen analizada con hash de integridad
+- Detalla cada paso del pipeline con métricas
+- Ideal para procesos de auditoría y revisión forense
 
 ### Sistema de Revisión
 - Marca cada paso como correcto/incorrecto
@@ -206,14 +234,25 @@ Usar salida anterior: ✓
    - Respuestas de cada modelo
    - Comparación de métricas
 
-### 5. Revisar Resultados
+### 5. Generar Reporte PDF Forense
+
+1. Ve a **"Historial"**
+2. Selecciona una ejecución
+3. Click en **"Descargar Reporte Forense PDF"**
+4. El PDF incluye:
+   - Imagen con hash SHA-256
+   - Contexto JSON de entrada
+   - Resultados de cada paso
+   - Firma digital del reporte
+
+### 6. Revisar Resultados
 
 1. Ve a **"Revisiones"**
 2. Selecciona una ejecución pendiente
 3. Marca cada paso como correcto/incorrecto
 4. Las métricas de precisión se actualizan automáticamente
 
-### 6. Analizar Estadísticas
+### 7. Analizar Estadísticas
 
 La pestaña **"Estadísticas"** muestra:
 - Total de ejecuciones
@@ -231,9 +270,12 @@ vision-arena/
 ├── llm_providers.py    # Proveedores de LLM (OpenAI, Anthropic, etc.)
 ├── pipeline.py         # Sistema de pipelines y comparación
 ├── storage.py          # Persistencia de datos
+├── pdf_generator.py    # Generador de reportes PDF forenses
 ├── requirements.txt    # Dependencias Python
 ├── Dockerfile          # Imagen Docker
 ├── docker-compose.yml  # Configuración Docker Compose
+├── docs/
+│   └── screenshots/    # Capturas de pantalla
 └── README.md           # Esta documentación
 ```
 
@@ -244,6 +286,7 @@ La aplicación expone una API REST completa:
 ### Configuraciones LLM
 - `GET /api/configs` - Listar configuraciones
 - `POST /api/configs` - Crear configuración
+- `PUT /api/configs/{name}` - Actualizar configuración
 - `DELETE /api/configs/{name}` - Eliminar configuración
 
 ### Pipelines
@@ -267,6 +310,7 @@ La aplicación expone una API REST completa:
 ### Historial
 - `GET /api/history` - Listar historial
 - `GET /api/history/{id}` - Detalles de ejecución
+- `GET /api/history/{id}/pdf` - Generar reporte PDF forense
 - `DELETE /api/history` - Limpiar historial
 
 ### Revisiones
@@ -294,6 +338,10 @@ La aplicación expone una API REST completa:
 ### Errores de memoria
 - Reduce `max_tokens` en la configuración
 - Usa modelos más pequeños para pasos intermedios
+
+### Error "unsupported_parameter" con GPT-5
+- Deja Max Tokens en 0 para usar el default del modelo
+- Los modelos nuevos usan `max_completion_tokens` automáticamente
 
 ## Licencia
 
