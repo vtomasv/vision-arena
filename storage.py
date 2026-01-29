@@ -31,13 +31,14 @@ class StorageManager:
         self.configs_dir = self.base_dir / "configs"
         self.images_dir = self.base_dir / "images"
         self.contexts_dir = self.base_dir / "contexts"  # Para archivos JSON de contexto
+        self.reports_dir = self.base_dir / "reports"  # Para reportes PDF forenses
         
         self._ensure_directories()
     
     def _ensure_directories(self):
         """Crea los directorios necesarios si no existen"""
         for dir_path in [self.pipelines_dir, self.executions_dir, self.batch_dir,
-                         self.configs_dir, self.images_dir, self.contexts_dir]:
+                         self.configs_dir, self.images_dir, self.contexts_dir, self.reports_dir]:
             dir_path.mkdir(parents=True, exist_ok=True)
     
     # ==================== LLM Configs ====================

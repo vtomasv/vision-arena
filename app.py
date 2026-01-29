@@ -20,6 +20,7 @@ import uvicorn
 from llm_providers import LLMConfig
 from pipeline import Pipeline, PipelineRunner, PipelineComparator, PipelineReviewer
 from storage import StorageManager
+from pdf_generator import generate_forensic_report
 
 # Inicializar aplicación
 app = FastAPI(title="Vision LLM Comparator", version="2.0.0")
@@ -496,6 +497,75 @@ async def clear_history():
     """Limpiar todo el historial"""
     count = storage.clear_history()
     return {"status": "ok", "deleted": count}
+
+# --- Forensic PDF Report ---
+
+@app.get("/api/history/{execution_id}/pdf")
+async def generate_pdf_report(execution_id: str):
+    """Generar reporte PDF forense para una ejecución"""
+    # Obtener detalles de la ejecución
+    exec_data = storage.get_execution_details(execution_id)
+    if not exec_data:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    
+    # Obtener ruta de la imagen
+    image_name = exec_data.get("image_name", "")
+    image_path = storage.images_dir / image_name if image_name else None
+    
+    if not image_path or not image_path.exists():
+        # Intentar buscar en el directorio de imágenes
+        image_path = None
+        for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
+            potential_path = storage.images_dir / f"{image_name}{ext}"
+            if potential_path.exists():
+                image_path = potential_path
+                break
+    
+    if not image_path:
+        image_path = storage.images_dir / image_name  # Usar el nombre original aunque no exista
+    
+    # Preparar contexto
+    context = exec_data.get("context_data", {})
+    
+    # Preparar pasos
+    steps = []
+    for step_result in exec_data.get("step_results", []):
+        steps.append({
+            "step_name": step_result.get("step_name", "Unknown Step"),
+            "llm_used": step_result.get("llm_config_name", "Unknown"),
+            "prompt": step_result.get("prompt_used", ""),
+            "response": step_result.get("response", ""),
+            "latency_ms": step_result.get("latency_ms", 0),
+            "input_tokens": step_result.get("input_tokens", 0),
+            "output_tokens": step_result.get("output_tokens", 0)
+        })
+    
+    # Generar PDF
+    pipeline_name = exec_data.get("pipeline_name", "Vehicle Analysis Pipeline")
+    
+    try:
+        result = generate_forensic_report(
+            execution_id=execution_id,
+            image_path=str(image_path) if image_path else "",
+            context=context,
+            steps=steps,
+            output_dir=str(storage.reports_dir),
+            pipeline_name=pipeline_name
+        )
+        
+        # Devolver el archivo PDF
+        return FileResponse(
+            result["report_path"],
+            media_type="application/pdf",
+            filename=f"forensic_report_{execution_id}.pdf",
+            headers={
+                "X-Report-Hash": result["report_hash"],
+                "X-Image-Hash": result.get("image_hash", ""),
+                "X-Timestamp": result["timestamp"]
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating PDF: {str(e)}")
 
 # --- Reviews ---
 
@@ -2157,6 +2227,51 @@ HTML_TEMPLATE = """
             return div.innerHTML;
         }
 
+        // ==================== Forensic PDF ====================
+        async function downloadForensicPDF(executionId) {
+            try {
+                // Mostrar loading
+                const btn = event.target.closest('button');
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Generando PDF...';
+                btn.disabled = true;
+                
+                const response = await fetch(`/api/history/${executionId}/pdf`);
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Error al generar PDF');
+                }
+                
+                // Obtener el hash del header para mostrar
+                const reportHash = response.headers.get('X-Report-Hash');
+                
+                // Descargar el archivo
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `forensic_report_${executionId}.pdf`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+                
+                // Mostrar notificación con hash
+                if (reportHash) {
+                    alert(`PDF generado exitosamente.\n\nHash SHA-256:\n${reportHash}`);
+                }
+                
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            } catch (error) {
+                alert('Error: ' + error.message);
+                const btn = event.target.closest('button');
+                btn.innerHTML = '<i class="fas fa-file-pdf mr-2"></i>Descargar Reporte Forense PDF';
+                btn.disabled = false;
+            }
+        }
+
         // ==================== History ====================
         async function loadHistory() {
             const res = await fetch('/api/history?limit=50');
@@ -2208,6 +2323,11 @@ HTML_TEMPLATE = """
                         <p><strong>Latencia:</strong> ${detail.total_latency_ms.toFixed(0)}ms</p>
                         <p><strong>Tokens:</strong> ${detail.total_input_tokens} in / ${detail.total_output_tokens} out</p>
                         <p><strong>Costo:</strong> $${detail.total_cost.toFixed(4)}</p>
+                        <div class="mt-3">
+                            <button class="button is-info" onclick="downloadForensicPDF('${detail.id}')">
+                                <i class="fas fa-file-pdf mr-2"></i>Descargar Reporte Forense PDF
+                            </button>
+                        </div>
                         ${detail.context_data ? `
                             <p class="mt-2"><strong>Contexto:</strong></p>
                             <pre class="context-preview">${JSON.stringify(detail.context_data, null, 2)}</pre>
