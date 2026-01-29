@@ -148,7 +148,7 @@ class OpenAIProvider(BaseLLMProvider):
             if self.config.api_key:
                 headers["Authorization"] = f"Bearer {self.config.api_key}"
             
-            # Construir payload con parámetros extra
+            # Construir payload base - solo con campos requeridos
             payload = {
                 "model": self.config.model,
                 "messages": [
@@ -167,20 +167,38 @@ class OpenAIProvider(BaseLLMProvider):
                             }
                         ]
                     }
-                ],
-                "max_tokens": self.config.max_tokens,
-                "temperature": self.config.temperature,
+                ]
             }
             
-            # Agregar parámetros extra si existen
+            # Modelos que usan max_completion_tokens en lugar de max_tokens
+            # (modelos nuevos como gpt-4.5, gpt-5, o1, etc.)
+            new_models = ["gpt-5", "gpt-4.5", "o1", "o3", "o1-mini", "o1-preview"]
+            uses_new_api = any(self.config.model.startswith(m) for m in new_models)
+            
+            # Agregar max_tokens solo si está configurado (> 0)
+            if self.config.max_tokens and self.config.max_tokens > 0:
+                if uses_new_api:
+                    payload["max_completion_tokens"] = self.config.max_tokens
+                else:
+                    payload["max_tokens"] = self.config.max_tokens
+            
+            # Agregar temperature solo si está configurado y el modelo lo soporta
+            # (los modelos o1/o3 no soportan temperature)
+            reasoning_models = ["o1", "o3"]
+            is_reasoning_model = any(self.config.model.startswith(m) for m in reasoning_models)
+            
+            if self.config.temperature is not None and self.config.temperature >= 0 and not is_reasoning_model:
+                payload["temperature"] = self.config.temperature
+            
+            # Agregar parámetros extra solo si están configurados
             extra = self.config.extra_params or {}
-            if "top_p" in extra:
+            if extra.get("top_p") is not None:
                 payload["top_p"] = extra["top_p"]
-            if "frequency_penalty" in extra:
+            if extra.get("frequency_penalty") is not None:
                 payload["frequency_penalty"] = extra["frequency_penalty"]
-            if "presence_penalty" in extra:
+            if extra.get("presence_penalty") is not None:
                 payload["presence_penalty"] = extra["presence_penalty"]
-            if "seed" in extra:
+            if extra.get("seed") is not None:
                 payload["seed"] = extra["seed"]
             
             api_base = self.config.api_base or "https://api.openai.com/v1"
@@ -279,12 +297,26 @@ class OpenAIProvider(BaseLLMProvider):
     def _estimate_cost(self, input_tokens: int, output_tokens: int) -> float:
         """Estima el costo basado en el modelo"""
         pricing = {
+            # OpenAI GPT-4o series
             "gpt-4o": {"input": 2.50, "output": 10.00},
             "gpt-4o-mini": {"input": 0.15, "output": 0.60},
             "gpt-4-turbo": {"input": 10.00, "output": 30.00},
+            # OpenAI GPT-4.1 series
+            "gpt-4.1": {"input": 2.00, "output": 8.00},
             "gpt-4.1-mini": {"input": 0.40, "output": 1.60},
             "gpt-4.1-nano": {"input": 0.10, "output": 0.40},
+            # OpenAI GPT-5 series (estimado)
+            "gpt-5": {"input": 5.00, "output": 15.00},
+            "gpt-4.5-preview": {"input": 75.00, "output": 150.00},
+            # OpenAI o1/o3 reasoning models
+            "o1": {"input": 15.00, "output": 60.00},
+            "o1-mini": {"input": 3.00, "output": 12.00},
+            "o1-preview": {"input": 15.00, "output": 60.00},
+            "o3-mini": {"input": 1.10, "output": 4.40},
+            # Google Gemini
             "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
+            "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+            "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
         }
         
         model_pricing = pricing.get(self.config.model, {"input": 0, "output": 0})
