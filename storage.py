@@ -102,6 +102,52 @@ class StorageManager:
                 continue
         return configs
     
+    def get_llm_config(self, name: str) -> Optional[Dict[str, Any]]:
+        """Obtiene una configuración de LLM por nombre (sin API key completa)"""
+        filename = f"{name.replace(' ', '_').lower()}.json"
+        filepath = self.configs_dir / filename
+        
+        if not filepath.exists():
+            # Intentar buscar por nombre exacto en todos los archivos
+            for fp in self.configs_dir.glob("*.json"):
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if data.get("name") == name:
+                        data["api_key"] = data["api_key"][:8] + "..." if data.get("api_key") else ""
+                        return data
+                except Exception:
+                    continue
+            return None
+        
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        data["api_key"] = data["api_key"][:8] + "..." if data.get("api_key") else ""
+        return data
+    
+    def get_llm_config_full(self, name: str) -> Optional[Dict[str, Any]]:
+        """Obtiene una configuración de LLM por nombre (con API key completa para edición)"""
+        filename = f"{name.replace(' ', '_').lower()}.json"
+        filepath = self.configs_dir / filename
+        
+        if not filepath.exists():
+            # Intentar buscar por nombre exacto en todos los archivos
+            for fp in self.configs_dir.glob("*.json"):
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if data.get("name") == name:
+                        return data
+                except Exception:
+                    continue
+            return None
+        
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        return data
+    
     def delete_llm_config(self, name: str) -> bool:
         """Elimina una configuración de LLM"""
         filename = f"{name.replace(' ', '_').lower()}.json"

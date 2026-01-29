@@ -134,66 +134,8 @@ class BaseLLMProvider(ABC):
 class OpenAIProvider(BaseLLMProvider):
     """Proveedor para OpenAI y APIs compatibles (incluyendo modelos locales via Ollama)"""
     
-    # Modelos de OpenAI que soportan visión
-    VISION_MODELS = {
-        "gpt-4o",
-        "gpt-4o-mini", 
-        "gpt-4-turbo",
-        "gpt-4-turbo-2024-04-09",
-        "gpt-4o-2024-05-13",
-        "gpt-4o-2024-08-06",
-        "gpt-4o-mini-2024-07-18",
-        # Modelos compatibles via proxy (Manus)
-        "gpt-4.1-mini",
-        "gpt-4.1-nano",
-        "gemini-2.5-flash",
-    }
-    
-    # Modelos que NO soportan visión
-    NON_VISION_MODELS = {
-        "gpt-3.5-turbo",
-        "gpt-3.5-turbo-16k",
-        "gpt-4",
-        "gpt-4-0314",
-        "gpt-4-0613",
-        "gpt-4-32k",
-    }
-    
-    def _validate_model(self) -> tuple:
-        """Valida si el modelo soporta visión. Retorna (is_valid, error_message)"""
-        model = self.config.model.lower()
-        
-        # Si hay api_base personalizado (no OpenAI directo), asumir que el modelo es válido
-        if self.config.api_base and "api.openai.com" not in self.config.api_base:
-            return (True, "")
-        
-        # Verificar modelos conocidos que NO soportan visión
-        for non_vision in self.NON_VISION_MODELS:
-            if non_vision in model:
-                return (False, f"El modelo '{self.config.model}' no soporta análisis de imágenes. Use gpt-4o, gpt-4o-mini o gpt-4-turbo para visión.")
-        
-        # Verificar si es un modelo de visión conocido
-        for vision_model in self.VISION_MODELS:
-            if vision_model in model:
-                return (True, "")
-        
-        # Modelo desconocido - advertir pero intentar
-        return (True, "")
-    
     async def analyze_image(self, image_path: str, prompt: str) -> LLMResponse:
         start_time = time.time()
-        
-        # Validar modelo antes de hacer la llamada
-        is_valid, error_msg = self._validate_model()
-        if not is_valid:
-            return LLMResponse(
-                content="",
-                model=self.config.model,
-                provider=self.config.provider,
-                latency_ms=0,
-                error=error_msg,
-                success=False
-            )
         
         try:
             image_data = self._encode_image(image_path)
@@ -206,6 +148,7 @@ class OpenAIProvider(BaseLLMProvider):
             if self.config.api_key:
                 headers["Authorization"] = f"Bearer {self.config.api_key}"
             
+            # Construir payload con parámetros extra
             payload = {
                 "model": self.config.model,
                 "messages": [
@@ -227,8 +170,18 @@ class OpenAIProvider(BaseLLMProvider):
                 ],
                 "max_tokens": self.config.max_tokens,
                 "temperature": self.config.temperature,
-                **self.config.extra_params
             }
+            
+            # Agregar parámetros extra si existen
+            extra = self.config.extra_params or {}
+            if "top_p" in extra:
+                payload["top_p"] = extra["top_p"]
+            if "frequency_penalty" in extra:
+                payload["frequency_penalty"] = extra["frequency_penalty"]
+            if "presence_penalty" in extra:
+                payload["presence_penalty"] = extra["presence_penalty"]
+            if "seed" in extra:
+                payload["seed"] = extra["seed"]
             
             api_base = self.config.api_base or "https://api.openai.com/v1"
             
@@ -239,13 +192,26 @@ class OpenAIProvider(BaseLLMProvider):
                     json=payload
                 )
                 
-                # Manejar errores HTTP con mensajes más claros
-                if response.status_code == 404:
-                    error_detail = f"Modelo '{self.config.model}' no encontrado. "
-                    if "api.openai.com" in api_base:
-                        error_detail += "Verifique que el modelo existe y soporta visión. Modelos válidos: gpt-4o, gpt-4o-mini, gpt-4-turbo"
-                    else:
-                        error_detail += f"Verifique que el modelo está disponible en {api_base}"
+                # Capturar el cuerpo de la respuesta para errores
+                response_text = response.text
+                
+                # Manejar errores HTTP con mensajes claros
+                if response.status_code != 200:
+                    error_detail = f"Error HTTP {response.status_code}"
+                    try:
+                        error_json = response.json()
+                        if "error" in error_json:
+                            error_obj = error_json["error"]
+                            error_message = error_obj.get("message", "")
+                            error_type = error_obj.get("type", "")
+                            error_code = error_obj.get("code", "")
+                            error_detail = f"[{error_type}] {error_message}"
+                            if error_code:
+                                error_detail += f" (code: {error_code})"
+                        else:
+                            error_detail = str(error_json)
+                    except:
+                        error_detail = f"Error HTTP {response.status_code}: {response_text[:500]}"
                     
                     return LLMResponse(
                         content="",
@@ -253,30 +219,10 @@ class OpenAIProvider(BaseLLMProvider):
                         provider=self.config.provider,
                         latency_ms=(time.time() - start_time) * 1000,
                         error=error_detail,
-                        success=False
+                        success=False,
+                        raw_response={"status_code": response.status_code, "body": response_text[:1000]}
                     )
                 
-                if response.status_code == 401:
-                    return LLMResponse(
-                        content="",
-                        model=self.config.model,
-                        provider=self.config.provider,
-                        latency_ms=(time.time() - start_time) * 1000,
-                        error="API Key inválida o sin permisos. Verifique su configuración.",
-                        success=False
-                    )
-                
-                if response.status_code == 429:
-                    return LLMResponse(
-                        content="",
-                        model=self.config.model,
-                        provider=self.config.provider,
-                        latency_ms=(time.time() - start_time) * 1000,
-                        error="Límite de rate excedido. Espere un momento e intente nuevamente.",
-                        success=False
-                    )
-                
-                response.raise_for_status()
                 data = response.json()
             
             latency = (time.time() - start_time) * 1000
@@ -298,24 +244,25 @@ class OpenAIProvider(BaseLLMProvider):
                 success=True
             )
             
-        except httpx.HTTPStatusError as e:
+        except httpx.TimeoutException:
             latency = (time.time() - start_time) * 1000
-            error_msg = f"Error HTTP {e.response.status_code}: {str(e)}"
-            
-            # Intentar extraer mensaje de error del body
-            try:
-                error_body = e.response.json()
-                if "error" in error_body:
-                    error_msg = error_body["error"].get("message", error_msg)
-            except:
-                pass
-            
             return LLMResponse(
                 content="",
                 model=self.config.model,
                 provider=self.config.provider,
                 latency_ms=latency,
-                error=error_msg,
+                error="Timeout: La solicitud tardó demasiado. Intente con una imagen más pequeña o aumente el timeout.",
+                success=False
+            )
+        except httpx.ConnectError as e:
+            latency = (time.time() - start_time) * 1000
+            api_base = self.config.api_base or "https://api.openai.com/v1"
+            return LLMResponse(
+                content="",
+                model=self.config.model,
+                provider=self.config.provider,
+                latency_ms=latency,
+                error=f"Error de conexión a {api_base}: {str(e)}",
                 success=False
             )
         except Exception as e:
@@ -325,7 +272,7 @@ class OpenAIProvider(BaseLLMProvider):
                 model=self.config.model,
                 provider=self.config.provider,
                 latency_ms=latency,
-                error=str(e),
+                error=f"Error inesperado: {type(e).__name__}: {str(e)}",
                 success=False
             )
     
@@ -385,6 +332,15 @@ class AnthropicProvider(BaseLLMProvider):
                 ]
             }
             
+            # Agregar parámetros extra si existen
+            extra = self.config.extra_params or {}
+            if "top_p" in extra:
+                payload["top_p"] = extra["top_p"]
+            if "top_k" in extra:
+                payload["top_k"] = extra["top_k"]
+            if self.config.temperature is not None:
+                payload["temperature"] = self.config.temperature
+            
             api_base = self.config.api_base or "https://api.anthropic.com/v1"
             
             async with httpx.AsyncClient(timeout=120.0) as client:
@@ -393,7 +349,30 @@ class AnthropicProvider(BaseLLMProvider):
                     headers=headers,
                     json=payload
                 )
-                response.raise_for_status()
+                
+                if response.status_code != 200:
+                    error_detail = f"Error HTTP {response.status_code}"
+                    try:
+                        error_json = response.json()
+                        if "error" in error_json:
+                            error_obj = error_json["error"]
+                            error_message = error_obj.get("message", "")
+                            error_type = error_obj.get("type", "")
+                            error_detail = f"[{error_type}] {error_message}"
+                        else:
+                            error_detail = str(error_json)
+                    except:
+                        error_detail = f"Error HTTP {response.status_code}: {response.text[:500]}"
+                    
+                    return LLMResponse(
+                        content="",
+                        model=self.config.model,
+                        provider="anthropic",
+                        latency_ms=(time.time() - start_time) * 1000,
+                        error=error_detail,
+                        success=False
+                    )
+                
                 data = response.json()
             
             latency = (time.time() - start_time) * 1000
@@ -425,9 +404,9 @@ class AnthropicProvider(BaseLLMProvider):
             return LLMResponse(
                 content="",
                 model=self.config.model,
-                provider=self.config.provider,
+                provider="anthropic",
                 latency_ms=latency,
-                error=str(e),
+                error=f"Error: {type(e).__name__}: {str(e)}",
                 success=False
             )
     
@@ -461,15 +440,28 @@ class OllamaProvider(BaseLLMProvider):
             # Para Docker, usar host.docker.internal:11434
             api_base = self.config.api_base or "http://localhost:11434"
             
+            options = {
+                "temperature": self.config.temperature,
+                "num_predict": self.config.max_tokens
+            }
+            
+            # Agregar parámetros extra si existen
+            extra = self.config.extra_params or {}
+            if "top_p" in extra:
+                options["top_p"] = extra["top_p"]
+            if "top_k" in extra:
+                options["top_k"] = extra["top_k"]
+            if "repeat_penalty" in extra:
+                options["repeat_penalty"] = extra["repeat_penalty"]
+            if "seed" in extra:
+                options["seed"] = extra["seed"]
+            
             payload = {
                 "model": self.config.model,
                 "prompt": prompt,
                 "images": [image_data],
                 "stream": False,
-                "options": {
-                    "temperature": self.config.temperature,
-                    "num_predict": self.config.max_tokens
-                }
+                "options": options
             }
             
             async with httpx.AsyncClient(timeout=300.0) as client:
@@ -477,7 +469,18 @@ class OllamaProvider(BaseLLMProvider):
                     f"{api_base}/api/generate",
                     json=payload
                 )
-                response.raise_for_status()
+                
+                if response.status_code != 200:
+                    error_detail = f"Error HTTP {response.status_code}: {response.text[:500]}"
+                    return LLMResponse(
+                        content="",
+                        model=self.config.model,
+                        provider="ollama",
+                        latency_ms=(time.time() - start_time) * 1000,
+                        error=error_detail,
+                        success=False
+                    )
+                
                 data = response.json()
             
             latency = (time.time() - start_time) * 1000
@@ -498,6 +501,17 @@ class OllamaProvider(BaseLLMProvider):
                 success=True
             )
             
+        except httpx.ConnectError as e:
+            latency = (time.time() - start_time) * 1000
+            api_base = self.config.api_base or "http://localhost:11434"
+            return LLMResponse(
+                content="",
+                model=self.config.model,
+                provider="ollama",
+                latency_ms=latency,
+                error=f"No se puede conectar a Ollama en {api_base}. Verifique que Ollama está corriendo.",
+                success=False
+            )
         except Exception as e:
             latency = (time.time() - start_time) * 1000
             return LLMResponse(
@@ -505,7 +519,7 @@ class OllamaProvider(BaseLLMProvider):
                 model=self.config.model,
                 provider="ollama",
                 latency_ms=latency,
-                error=str(e),
+                error=f"Error: {type(e).__name__}: {str(e)}",
                 success=False
             )
 
@@ -548,13 +562,29 @@ class GoogleProvider(BaseLLMProvider):
                     "temperature": self.config.temperature
                 }
                 
+                # Agregar parámetros extra
+                extra = self.config.extra_params or {}
+                if "top_p" in extra:
+                    payload["top_p"] = extra["top_p"]
+                
                 async with httpx.AsyncClient(timeout=120.0) as client:
                     response = await client.post(
                         f"{self.config.api_base}/chat/completions",
                         headers=headers,
                         json=payload
                     )
-                    response.raise_for_status()
+                    
+                    if response.status_code != 200:
+                        error_detail = f"Error HTTP {response.status_code}: {response.text[:500]}"
+                        return LLMResponse(
+                            content="",
+                            model=self.config.model,
+                            provider="google",
+                            latency_ms=(time.time() - start_time) * 1000,
+                            error=error_detail,
+                            success=False
+                        )
+                    
                     data = response.json()
                 
                 latency = (time.time() - start_time) * 1000
@@ -577,6 +607,18 @@ class GoogleProvider(BaseLLMProvider):
                 api_key = self.config.api_key
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config.model}:generateContent?key={api_key}"
                 
+                generation_config = {
+                    "temperature": self.config.temperature,
+                    "maxOutputTokens": self.config.max_tokens
+                }
+                
+                # Agregar parámetros extra
+                extra = self.config.extra_params or {}
+                if "top_p" in extra:
+                    generation_config["topP"] = extra["top_p"]
+                if "top_k" in extra:
+                    generation_config["topK"] = extra["top_k"]
+                
                 payload = {
                     "contents": [
                         {
@@ -591,15 +633,30 @@ class GoogleProvider(BaseLLMProvider):
                             ]
                         }
                     ],
-                    "generationConfig": {
-                        "temperature": self.config.temperature,
-                        "maxOutputTokens": self.config.max_tokens
-                    }
+                    "generationConfig": generation_config
                 }
                 
                 async with httpx.AsyncClient(timeout=120.0) as client:
                     response = await client.post(url, json=payload)
-                    response.raise_for_status()
+                    
+                    if response.status_code != 200:
+                        error_detail = f"Error HTTP {response.status_code}"
+                        try:
+                            error_json = response.json()
+                            if "error" in error_json:
+                                error_detail = error_json["error"].get("message", error_detail)
+                        except:
+                            error_detail = f"Error HTTP {response.status_code}: {response.text[:500]}"
+                        
+                        return LLMResponse(
+                            content="",
+                            model=self.config.model,
+                            provider="google",
+                            latency_ms=(time.time() - start_time) * 1000,
+                            error=error_detail,
+                            success=False
+                        )
+                    
                     data = response.json()
                 
                 latency = (time.time() - start_time) * 1000
@@ -631,7 +688,7 @@ class GoogleProvider(BaseLLMProvider):
                 model=self.config.model,
                 provider="google",
                 latency_ms=latency,
-                error=str(e),
+                error=f"Error: {type(e).__name__}: {str(e)}",
                 success=False
             )
 

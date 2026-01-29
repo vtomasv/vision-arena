@@ -35,6 +35,7 @@ class LLMConfigCreate(BaseModel):
     api_base: str = ""
     max_tokens: int = 4096
     temperature: float = 0.7
+    extra_params: Dict[str, Any] = {}
 
 class PipelineStepCreate(BaseModel):
     name: str
@@ -76,7 +77,8 @@ async def create_config(config: LLMConfigCreate):
         api_key=config.api_key,
         api_base=config.api_base,
         max_tokens=config.max_tokens,
-        temperature=config.temperature
+        temperature=config.temperature,
+        extra_params=config.extra_params
     )
     storage.save_llm_config(llm_config)
     return {"status": "ok", "name": config.name}
@@ -85,6 +87,39 @@ async def create_config(config: LLMConfigCreate):
 async def list_configs():
     """Listar todas las configuraciones de LLM"""
     return storage.list_llm_configs()
+
+@app.get("/api/configs/{name}")
+async def get_config(name: str):
+    """Obtener una configuración de LLM por nombre (con API key completa para edición)"""
+    config = storage.get_llm_config_full(name)
+    if config:
+        return config
+    raise HTTPException(status_code=404, detail="Config not found")
+
+@app.put("/api/configs/{name}")
+async def update_config(name: str, config: LLMConfigCreate):
+    """Actualizar una configuración de LLM existente"""
+    existing = storage.get_llm_config(name)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Config not found")
+    
+    llm_config = LLMConfig(
+        name=config.name,
+        provider=config.provider,
+        model=config.model,
+        api_key=config.api_key,
+        api_base=config.api_base,
+        max_tokens=config.max_tokens,
+        temperature=config.temperature,
+        extra_params=config.extra_params
+    )
+    
+    # Si el nombre cambió, eliminar el anterior
+    if name != config.name:
+        storage.delete_llm_config(name)
+    
+    storage.save_llm_config(llm_config)
+    return {"status": "ok", "name": config.name}
 
 @app.delete("/api/configs/{name}")
 async def delete_config(name: str):
@@ -1034,9 +1069,82 @@ HTML_TEMPLATE = """
                                 </div>
                             </div>
                             
-                            <button class="button is-primary is-fullwidth" id="btn-save-config">
-                                <i class="fas fa-save mr-2"></i>Guardar Configuración
-                            </button>
+                            <!-- Parámetros Avanzados -->
+                            <div class="field">
+                                <label class="label">
+                                    <a onclick="document.getElementById('advanced-params').classList.toggle('is-hidden')" style="cursor:pointer;">
+                                        <i class="fas fa-cog mr-1"></i>Parámetros Avanzados <i class="fas fa-chevron-down is-size-7"></i>
+                                    </a>
+                                </label>
+                            </div>
+                            
+                            <div id="advanced-params" class="is-hidden">
+                                <div class="notification is-light is-info is-size-7 mb-3">
+                                    <p><strong>top_p:</strong> Nucleus sampling (0.0-1.0). Alternativa a temperature.</p>
+                                    <p><strong>top_k:</strong> Limita tokens considerados (Anthropic/Ollama).</p>
+                                    <p><strong>frequency_penalty:</strong> Penaliza repetición de tokens (-2.0 a 2.0, OpenAI).</p>
+                                    <p><strong>presence_penalty:</strong> Penaliza temas ya mencionados (-2.0 a 2.0, OpenAI).</p>
+                                    <p><strong>repeat_penalty:</strong> Penaliza repeticiones (Ollama, >1.0).</p>
+                                    <p><strong>seed:</strong> Para resultados reproducibles.</p>
+                                </div>
+                                
+                                <div class="columns">
+                                    <div class="column">
+                                        <div class="field">
+                                            <label class="label is-small">top_p</label>
+                                            <input class="input is-small" type="number" id="config-top-p" placeholder="0.9" step="0.05" min="0" max="1">
+                                        </div>
+                                    </div>
+                                    <div class="column">
+                                        <div class="field">
+                                            <label class="label is-small">top_k</label>
+                                            <input class="input is-small" type="number" id="config-top-k" placeholder="40" min="1">
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="columns">
+                                    <div class="column">
+                                        <div class="field">
+                                            <label class="label is-small">frequency_penalty</label>
+                                            <input class="input is-small" type="number" id="config-frequency-penalty" placeholder="0" step="0.1" min="-2" max="2">
+                                        </div>
+                                    </div>
+                                    <div class="column">
+                                        <div class="field">
+                                            <label class="label is-small">presence_penalty</label>
+                                            <input class="input is-small" type="number" id="config-presence-penalty" placeholder="0" step="0.1" min="-2" max="2">
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="columns">
+                                    <div class="column">
+                                        <div class="field">
+                                            <label class="label is-small">repeat_penalty (Ollama)</label>
+                                            <input class="input is-small" type="number" id="config-repeat-penalty" placeholder="1.1" step="0.1" min="0">
+                                        </div>
+                                    </div>
+                                    <div class="column">
+                                        <div class="field">
+                                            <label class="label is-small">seed</label>
+                                            <input class="input is-small" type="number" id="config-seed" placeholder="">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <input type="hidden" id="config-edit-mode" value="">
+                            
+                            <div class="buttons">
+                                <button class="button is-primary is-expanded" id="btn-save-config">
+                                    <i class="fas fa-save mr-2"></i><span id="btn-save-config-text">Guardar Configuración</span>
+                                </button>
+                                <button class="button is-light" id="btn-cancel-edit" style="display:none;">
+                                    <i class="fas fa-times mr-2"></i>Cancelar
+                                </button>
+                            </div>
+                            
                         </div>
                     </div>
                 </div>
@@ -1241,7 +1349,13 @@ HTML_TEMPLATE = """
             const list = document.getElementById('configs-list');
             const select = document.getElementById('pipeline-default-llm');
             
-            list.innerHTML = configs.map(c => `
+            list.innerHTML = configs.map(c => {
+                const extraParams = c.extra_params || {};
+                const extraInfo = Object.keys(extraParams).length > 0 
+                    ? `<br><span class="tag is-light is-small">Extra: ${Object.keys(extraParams).join(', ')}</span>` 
+                    : '';
+                
+                return `
                 <div class="box">
                     <div class="level">
                         <div class="level-left">
@@ -1255,42 +1369,143 @@ HTML_TEMPLATE = """
                                     API Base: ${c.api_base || 'default'} | 
                                     Max Tokens: ${c.max_tokens} | 
                                     Temp: ${c.temperature}
+                                    ${extraInfo}
                                 </p>
                             </div>
                         </div>
                         <div class="level-right">
-                            <button class="button is-small is-danger" onclick="deleteConfig('${c.name}')">
-                                <i class="fas fa-trash"></i>
-                            </button>
+                            <div class="buttons are-small">
+                                <button class="button is-info is-outlined" onclick="editConfig('${c.name}')">
+                                    <i class="fas fa-edit"></i>
+                                </button>
+                                <button class="button is-danger is-outlined" onclick="deleteConfig('${c.name}')">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
-            `).join('') || '<p class="has-text-grey">No hay configuraciones guardadas</p>';
+            `}).join('') || '<p class="has-text-grey">No hay configuraciones guardadas</p>';
             
             select.innerHTML = '<option value="">Seleccionar...</option>' + 
                 configs.map(c => `<option value="${c.name}">${c.name} (${c.model})</option>`).join('');
         }
+        
+        async function editConfig(name) {
+            const res = await fetch('/api/configs/' + encodeURIComponent(name));
+            if (!res.ok) {
+                alert('Error al cargar la configuración');
+                return;
+            }
+            const config = await res.json();
+            
+            // Llenar el formulario
+            document.getElementById('config-name').value = config.name;
+            document.getElementById('config-provider').value = config.provider;
+            document.getElementById('config-model').value = config.model;
+            document.getElementById('config-api-key').value = config.api_key || '';
+            document.getElementById('config-api-base').value = config.api_base || '';
+            document.getElementById('config-max-tokens').value = config.max_tokens || 4096;
+            document.getElementById('config-temperature').value = config.temperature || 0.7;
+            
+            // Parámetros avanzados
+            const extra = config.extra_params || {};
+            document.getElementById('config-top-p').value = extra.top_p || '';
+            document.getElementById('config-top-k').value = extra.top_k || '';
+            document.getElementById('config-frequency-penalty').value = extra.frequency_penalty || '';
+            document.getElementById('config-presence-penalty').value = extra.presence_penalty || '';
+            document.getElementById('config-repeat-penalty').value = extra.repeat_penalty || '';
+            document.getElementById('config-seed').value = extra.seed || '';
+            
+            // Mostrar parámetros avanzados si hay alguno
+            if (Object.keys(extra).length > 0) {
+                document.getElementById('advanced-params').classList.remove('is-hidden');
+            }
+            
+            // Modo edición
+            document.getElementById('config-edit-mode').value = name;
+            document.getElementById('btn-save-config-text').textContent = 'Actualizar Configuración';
+            document.getElementById('btn-cancel-edit').style.display = 'inline-flex';
+            
+            // Scroll al formulario
+            document.getElementById('config-name').scrollIntoView({ behavior: 'smooth' });
+        }
+        
+        function clearConfigForm() {
+            document.getElementById('config-name').value = '';
+            document.getElementById('config-provider').value = 'openai';
+            document.getElementById('config-model').value = '';
+            document.getElementById('config-api-key').value = '';
+            document.getElementById('config-api-base').value = '';
+            document.getElementById('config-max-tokens').value = '4096';
+            document.getElementById('config-temperature').value = '0.7';
+            document.getElementById('config-top-p').value = '';
+            document.getElementById('config-top-k').value = '';
+            document.getElementById('config-frequency-penalty').value = '';
+            document.getElementById('config-presence-penalty').value = '';
+            document.getElementById('config-repeat-penalty').value = '';
+            document.getElementById('config-seed').value = '';
+            document.getElementById('config-edit-mode').value = '';
+            document.getElementById('btn-save-config-text').textContent = 'Guardar Configuración';
+            document.getElementById('btn-cancel-edit').style.display = 'none';
+            document.getElementById('advanced-params').classList.add('is-hidden');
+        }
+        
+        document.getElementById('btn-cancel-edit').addEventListener('click', clearConfigForm);
 
         document.getElementById('btn-save-config').addEventListener('click', async () => {
+            // Construir extra_params solo con valores no vacíos
+            const extra_params = {};
+            const topP = document.getElementById('config-top-p').value;
+            const topK = document.getElementById('config-top-k').value;
+            const freqPenalty = document.getElementById('config-frequency-penalty').value;
+            const presPenalty = document.getElementById('config-presence-penalty').value;
+            const repeatPenalty = document.getElementById('config-repeat-penalty').value;
+            const seed = document.getElementById('config-seed').value;
+            
+            if (topP) extra_params.top_p = parseFloat(topP);
+            if (topK) extra_params.top_k = parseInt(topK);
+            if (freqPenalty) extra_params.frequency_penalty = parseFloat(freqPenalty);
+            if (presPenalty) extra_params.presence_penalty = parseFloat(presPenalty);
+            if (repeatPenalty) extra_params.repeat_penalty = parseFloat(repeatPenalty);
+            if (seed) extra_params.seed = parseInt(seed);
+            
             const config = {
                 name: document.getElementById('config-name').value,
                 provider: document.getElementById('config-provider').value,
                 model: document.getElementById('config-model').value,
                 api_key: document.getElementById('config-api-key').value,
                 api_base: document.getElementById('config-api-base').value,
-                max_tokens: parseInt(document.getElementById('config-max-tokens').value),
-                temperature: parseFloat(document.getElementById('config-temperature').value)
+                max_tokens: parseInt(document.getElementById('config-max-tokens').value) || 4096,
+                temperature: parseFloat(document.getElementById('config-temperature').value) || 0.7,
+                extra_params: extra_params
             };
             
-            await fetch('/api/configs', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(config)
-            });
+            if (!config.name) {
+                alert('El nombre es requerido');
+                return;
+            }
+            
+            const editMode = document.getElementById('config-edit-mode').value;
+            
+            if (editMode) {
+                // Modo edición - usar PUT
+                await fetch('/api/configs/' + encodeURIComponent(editMode), {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+            } else {
+                // Modo creación - usar POST
+                await fetch('/api/configs', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+            }
             
             loadConfigs();
-            document.getElementById('config-name').value = '';
-            document.getElementById('config-api-key').value = '';
+            clearConfigForm();
         });
 
         async function deleteConfig(name) {
