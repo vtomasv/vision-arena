@@ -134,8 +134,66 @@ class BaseLLMProvider(ABC):
 class OpenAIProvider(BaseLLMProvider):
     """Proveedor para OpenAI y APIs compatibles (incluyendo modelos locales via Ollama)"""
     
+    # Modelos de OpenAI que soportan visión
+    VISION_MODELS = {
+        "gpt-4o",
+        "gpt-4o-mini", 
+        "gpt-4-turbo",
+        "gpt-4-turbo-2024-04-09",
+        "gpt-4o-2024-05-13",
+        "gpt-4o-2024-08-06",
+        "gpt-4o-mini-2024-07-18",
+        # Modelos compatibles via proxy (Manus)
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
+        "gemini-2.5-flash",
+    }
+    
+    # Modelos que NO soportan visión
+    NON_VISION_MODELS = {
+        "gpt-3.5-turbo",
+        "gpt-3.5-turbo-16k",
+        "gpt-4",
+        "gpt-4-0314",
+        "gpt-4-0613",
+        "gpt-4-32k",
+    }
+    
+    def _validate_model(self) -> tuple:
+        """Valida si el modelo soporta visión. Retorna (is_valid, error_message)"""
+        model = self.config.model.lower()
+        
+        # Si hay api_base personalizado (no OpenAI directo), asumir que el modelo es válido
+        if self.config.api_base and "api.openai.com" not in self.config.api_base:
+            return (True, "")
+        
+        # Verificar modelos conocidos que NO soportan visión
+        for non_vision in self.NON_VISION_MODELS:
+            if non_vision in model:
+                return (False, f"El modelo '{self.config.model}' no soporta análisis de imágenes. Use gpt-4o, gpt-4o-mini o gpt-4-turbo para visión.")
+        
+        # Verificar si es un modelo de visión conocido
+        for vision_model in self.VISION_MODELS:
+            if vision_model in model:
+                return (True, "")
+        
+        # Modelo desconocido - advertir pero intentar
+        return (True, "")
+    
     async def analyze_image(self, image_path: str, prompt: str) -> LLMResponse:
         start_time = time.time()
+        
+        # Validar modelo antes de hacer la llamada
+        is_valid, error_msg = self._validate_model()
+        if not is_valid:
+            return LLMResponse(
+                content="",
+                model=self.config.model,
+                provider=self.config.provider,
+                latency_ms=0,
+                error=error_msg,
+                success=False
+            )
         
         try:
             image_data = self._encode_image(image_path)
@@ -180,6 +238,44 @@ class OpenAIProvider(BaseLLMProvider):
                     headers=headers,
                     json=payload
                 )
+                
+                # Manejar errores HTTP con mensajes más claros
+                if response.status_code == 404:
+                    error_detail = f"Modelo '{self.config.model}' no encontrado. "
+                    if "api.openai.com" in api_base:
+                        error_detail += "Verifique que el modelo existe y soporta visión. Modelos válidos: gpt-4o, gpt-4o-mini, gpt-4-turbo"
+                    else:
+                        error_detail += f"Verifique que el modelo está disponible en {api_base}"
+                    
+                    return LLMResponse(
+                        content="",
+                        model=self.config.model,
+                        provider=self.config.provider,
+                        latency_ms=(time.time() - start_time) * 1000,
+                        error=error_detail,
+                        success=False
+                    )
+                
+                if response.status_code == 401:
+                    return LLMResponse(
+                        content="",
+                        model=self.config.model,
+                        provider=self.config.provider,
+                        latency_ms=(time.time() - start_time) * 1000,
+                        error="API Key inválida o sin permisos. Verifique su configuración.",
+                        success=False
+                    )
+                
+                if response.status_code == 429:
+                    return LLMResponse(
+                        content="",
+                        model=self.config.model,
+                        provider=self.config.provider,
+                        latency_ms=(time.time() - start_time) * 1000,
+                        error="Límite de rate excedido. Espere un momento e intente nuevamente.",
+                        success=False
+                    )
+                
                 response.raise_for_status()
                 data = response.json()
             
@@ -202,6 +298,26 @@ class OpenAIProvider(BaseLLMProvider):
                 success=True
             )
             
+        except httpx.HTTPStatusError as e:
+            latency = (time.time() - start_time) * 1000
+            error_msg = f"Error HTTP {e.response.status_code}: {str(e)}"
+            
+            # Intentar extraer mensaje de error del body
+            try:
+                error_body = e.response.json()
+                if "error" in error_body:
+                    error_msg = error_body["error"].get("message", error_msg)
+            except:
+                pass
+            
+            return LLMResponse(
+                content="",
+                model=self.config.model,
+                provider=self.config.provider,
+                latency_ms=latency,
+                error=error_msg,
+                success=False
+            )
         except Exception as e:
             latency = (time.time() - start_time) * 1000
             return LLMResponse(
@@ -221,6 +337,7 @@ class OpenAIProvider(BaseLLMProvider):
             "gpt-4-turbo": {"input": 10.00, "output": 30.00},
             "gpt-4.1-mini": {"input": 0.40, "output": 1.60},
             "gpt-4.1-nano": {"input": 0.10, "output": 0.40},
+            "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
         }
         
         model_pricing = pricing.get(self.config.model, {"input": 0, "output": 0})
@@ -293,7 +410,7 @@ class AnthropicProvider(BaseLLMProvider):
             return LLMResponse(
                 content=content,
                 model=self.config.model,
-                provider=self.config.provider,
+                provider="anthropic",
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=input_tokens + output_tokens,
