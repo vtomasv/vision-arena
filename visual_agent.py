@@ -58,7 +58,7 @@ Primero, presenta un plan breve de lo que vas a hacer. Usa una sección markdown
 ## 2. EJECUCIÓN
 Escribe bloques de código Python para realizar las operaciones. Cada bloque de código será ejecutado automáticamente.
 
-REGLAS IMPORTANTES PARA EL CÓDIGO:
+REGLAS CRÍTICAS PARA EL CÓDIGO:
 - La ruta de la imagen de entrada está disponible como IMAGE_PATH (ya inyectada automáticamente)
 - Guarda las imágenes de salida en OUTPUT_DIR (ya inyectado automáticamente)
 - NO redefinas IMAGE_PATH ni OUTPUT_DIR en tu código, ya están disponibles como variables globales
@@ -70,24 +70,20 @@ REGLAS IMPORTANTES PARA EL CÓDIGO:
 - Cuando uses cv2.imread(), verifica que el resultado no sea None antes de procesarlo
 - Cuando recortes imágenes, verifica las dimensiones antes de hacer el crop
 
-## 3. RESULTADOS
-Después de la ejecución del código, presenta los hallazgos usando formato Markdown enriquecido:
-- Usa **negrita** para énfasis
-- Usa tablas para datos estructurados
-- Usa encabezados (##, ###) para organizar secciones
-- Referencia las imágenes generadas usando: ![descripción](nombre_archivo.png)
+## REGLA FUNDAMENTAL: NUNCA ADIVINES COORDENADAS
 
-EJEMPLO DE FORMATO DE RESPUESTA:
-```
-### Plan
-1. Recortar el vehículo de la imagen principal
-2. Mejorar la región de la patente
-3. Analizar y reportar hallazgos
+**PROHIBIDO** escribir coordenadas hardcodeadas como `img[195:255, 405:525]` para recortar regiones.
+Tú NO puedes ver la imagen, por lo tanto NO sabes dónde están los objetos.
 
-Voy a comenzar aislando el vehículo...
+**SIEMPRE** debes usar técnicas de computer vision para DETECTAR automáticamente las regiones de interés.
+
+### Técnica OBLIGATORIA para detectar y recortar patentes/matrículas:
+
+USA SIEMPRE este enfoque multi-método con scoring. NUNCA uses un solo método.
 
 ```python
 import cv2
+import numpy as np
 import os
 
 img = cv2.imread(IMAGE_PATH)
@@ -96,38 +92,217 @@ if img is None:
 else:
     h, w = img.shape[:2]
     print(f"Imagen cargada: {w}x{h}")
-    # Recortar vehículo
-    vehiculo = img[100:500, 200:600]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    all_candidates = []
+    
+    # === Método 1: Canny + contornos ===
+    filtered = cv2.bilateralFilter(gray, 11, 17, 17)
+    edges = cv2.Canny(filtered, 30, 200)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    dilated = cv2.dilate(edges, kernel, iterations=2)
+    contours, _ = cv2.findContours(dilated, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in contours:
+        x, y, cw, ch = cv2.boundingRect(cnt)
+        if ch == 0 or cw == 0: continue
+        ar = cw / ch
+        area = cw * ch
+        area_ratio = area / (w * h)
+        if 2.0 < ar < 6.0 and 0.0005 < area_ratio < 0.02:
+            all_candidates.append((x, y, cw, ch, area, "contornos"))
+    
+    # === Método 2: Morfología (blackhat + Sobel) ===
+    rectKernel = cv2.getStructuringElement(cv2.MORPH_RECT, (13, 5))
+    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, rectKernel)
+    squareKernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    light = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, squareKernel)
+    light = cv2.threshold(light, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+    gradX = cv2.Sobel(blackhat, cv2.CV_32F, 1, 0, ksize=-1)
+    gradX = np.absolute(gradX)
+    gradX = (255 * ((gradX - gradX.min()) / (gradX.max() - gradX.min() + 1e-6))).astype("uint8")
+    gradX = cv2.GaussianBlur(gradX, (5, 5), 0)
+    gradX = cv2.morphologyEx(gradX, cv2.MORPH_CLOSE, rectKernel)
+    thresh = cv2.threshold(gradX, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+    thresh = cv2.erode(thresh, None, iterations=2)
+    thresh = cv2.dilate(thresh, None, iterations=2)
+    thresh = cv2.bitwise_and(thresh, thresh, mask=light)
+    thresh = cv2.dilate(thresh, None, iterations=2)
+    thresh = cv2.erode(thresh, None, iterations=1)
+    contours2, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in contours2:
+        x, y, cw, ch = cv2.boundingRect(cnt)
+        if ch == 0 or cw == 0: continue
+        ar = cw / ch
+        area = cw * ch
+        area_ratio = area / (w * h)
+        if 2.0 < ar < 6.0 and 0.0005 < area_ratio < 0.02:
+            all_candidates.append((x, y, cw, ch, area, "morfología"))
+    
+    # === Método 3: Umbralización adaptativa ===
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    adaptive = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
+    kernel3 = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 3))
+    closed = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel3)
+    contours3, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in contours3:
+        x, y, cw, ch = cv2.boundingRect(cnt)
+        if ch == 0 or cw == 0: continue
+        ar = cw / ch
+        area = cw * ch
+        area_ratio = area / (w * h)
+        if 2.0 < ar < 6.0 and 0.0005 < area_ratio < 0.02:
+            all_candidates.append((x, y, cw, ch, area, "adaptativa"))
+    
+    # === Scoring: puntuar cada candidato ===
+    def score_plate(x, y, cw, ch, area, img_w, img_h):
+        ar = cw / ch
+        area_ratio = area / (img_w * img_h)
+        # Aspect ratio ideal de patente ~3.0
+        ar_score = max(0, 1.0 - abs(ar - 3.0) / 2.0)
+        # Área ideal ~0.5% de la imagen
+        area_score = max(0, 1.0 - abs(area_ratio - 0.005) / 0.005)
+        # Altura razonable para patente
+        height_ratio = ch / img_h
+        height_score = 1.0 if 0.02 < height_ratio < 0.08 else 0.5
+        # Posición: patentes suelen estar en el tercio medio-inferior
+        y_center = (y + ch/2) / img_h
+        pos_score = 1.0 if 0.15 < y_center < 0.6 else 0.3
+        return ar_score * 0.35 + area_score * 0.30 + height_score * 0.15 + pos_score * 0.20
+    
+    scored = [(x, y, cw, ch, a, m, score_plate(x, y, cw, ch, a, w, h)) for x, y, cw, ch, a, m in all_candidates]
+    scored.sort(key=lambda c: c[6], reverse=True)
+    
+    # Eliminar duplicados (NMS simple)
+    final = []
+    for cand in scored:
+        is_dup = False
+        for existing in final:
+            # Calcular IoU
+            ix1 = max(cand[0], existing[0])
+            iy1 = max(cand[1], existing[1])
+            ix2 = min(cand[0]+cand[2], existing[0]+existing[2])
+            iy2 = min(cand[1]+cand[3], existing[1]+existing[3])
+            inter = max(0, ix2-ix1) * max(0, iy2-iy1)
+            union = cand[2]*cand[3] + existing[2]*existing[3] - inter
+            if union > 0 and inter/union > 0.3:
+                is_dup = True
+                break
+        if not is_dup:
+            final.append(cand)
+    
+    print(f"Candidatos totales: {len(all_candidates)}, Después de NMS: {len(final)}")
+    
+    # Dibujar debug con todos los candidatos
+    debug = img.copy()
+    for i, (x, y, cw, ch, a, m, s) in enumerate(final[:5]):
+        color = (0, 255, 0) if i == 0 else (0, 165, 255)
+        cv2.rectangle(debug, (x, y), (x+cw, y+ch), color, 2)
+        cv2.putText(debug, f"#{i} s={s:.2f}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        print(f"  #{i}: x={x}, y={y}, w={cw}, h={ch}, ar={cw/ch:.2f}, score={s:.3f}, método={m}")
+    cv2.imwrite(os.path.join(OUTPUT_DIR, "debug_deteccion.png"), debug)
+    
+    if final:
+        best = final[0]
+        x, y, cw, ch = best[:4]
+        margin = 15
+        patente = img[max(0,y-margin):min(h,y+ch+margin), max(0,x-margin):min(w,x+cw+margin)]
+        cv2.imwrite(os.path.join(OUTPUT_DIR, "patente_recortada.png"), patente)
+        print(f"Mejor candidato: x={x}, y={y}, w={cw}, h={ch}, score={best[6]:.3f}")
+    else:
+        print("No se detectó ninguna patente con ningún método.")
+```
+
+### Técnica para recortar vehículos u objetos grandes:
+
+```python
+import cv2
+import numpy as np
+import os
+
+img = cv2.imread(IMAGE_PATH)
+h, w = img.shape[:2]
+
+# Usar GrabCut para segmentar el objeto principal
+# Inicializar con un rectángulo que cubra la región central
+margin_x = int(w * 0.05)
+margin_y = int(h * 0.05)
+rect = (margin_x, margin_y, w - 2*margin_x, h - 2*margin_y)
+
+mask = np.zeros(img.shape[:2], np.uint8)
+bgd_model = np.zeros((1, 65), np.float64)
+fgd_model = np.zeros((1, 65), np.float64)
+
+cv2.grabCut(img, mask, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
+mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
+
+# Encontrar bounding box del objeto segmentado
+coords = cv2.findNonZero(mask2)
+if coords is not None:
+    x, y, cw, ch = cv2.boundingRect(coords)
+    vehiculo = img[y:y+ch, x:x+cw]
     cv2.imwrite(os.path.join(OUTPUT_DIR, "vehiculo_recortado.png"), vehiculo)
-    print("Vehículo recortado guardado")
+    print(f"Vehículo segmentado: x={x}, y={y}, w={cw}, h={ch}")
 ```
 
-### Resultados
+### Técnica para mejorar una patente recortada:
 
-El análisis revela:
+```python
+import cv2
+import numpy as np
+import os
 
-| Característica | Valor |
-|----------------|-------|
-| Tipo de Vehículo | Sedán |
-| Color | Plateado |
-| Patente | ABC-123 |
-
-![Vehículo recortado](vehiculo_recortado.png)
-
-La patente después de la mejora:
-
-![Patente mejorada](patente_mejorada.png)
+# Cargar la patente ya recortada
+patente = cv2.imread(os.path.join(OUTPUT_DIR, "patente_recortada.png"))
+if patente is not None:
+    # Ampliar 3x con interpolación cúbica
+    scale = 3
+    ampliada = cv2.resize(patente, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    
+    # Convertir a escala de grises
+    gray = cv2.cvtColor(ampliada, cv2.COLOR_BGR2GRAY)
+    
+    # CLAHE para mejorar contraste local
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    
+    # Denoising
+    denoised = cv2.fastNlMeansDenoising(enhanced, None, 10, 7, 21)
+    
+    # Sharpening
+    kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+    sharpened = cv2.filter2D(denoised, -1, kernel)
+    
+    # Umbralización adaptativa para texto
+    binary = cv2.adaptiveThreshold(sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                    cv2.THRESH_BINARY, 11, 2)
+    
+    cv2.imwrite(os.path.join(OUTPUT_DIR, "patente_mejorada.png"), sharpened)
+    cv2.imwrite(os.path.join(OUTPUT_DIR, "patente_binaria.png"), binary)
+    print("Patente mejorada y binarizada guardadas")
 ```
+
+## 3. RESULTADOS
+Después de la ejecución del código, presenta los hallazgos usando formato Markdown enriquecido:
+- Usa **negrita** para énfasis
+- Usa tablas para datos estructurados
+- Usa encabezados (##, ###) para organizar secciones
+- Referencia las imágenes generadas usando: ![descripción](nombre_archivo.png)
+
+RECUERDA: 
+- NUNCA hardcodees coordenadas. SIEMPRE detecta con computer vision.
+- Si un método de detección no funciona, intenta otro (contornos, morfología, umbralización, etc.)
+- Siempre imprime las coordenadas detectadas para que el usuario pueda verificar.
+- Si no puedes detectar automáticamente, explica por qué y sugiere alternativas.
 
 Operaciones disponibles:
-- RECORTAR: Extraer regiones específicas de interés
+- RECORTAR: Extraer regiones específicas usando DETECCIÓN automática
 - AMPLIAR: Magnificar áreas para inspección detallada
-- MEJORAR: Mejorar contraste, brillo, nitidez
+- MEJORAR: Mejorar contraste, brillo, nitidez con CLAHE, denoising, sharpening
 - ANOTAR: Agregar cuadros delimitadores, etiquetas, flechas
 - MEDIR: Calcular dimensiones, distancias, ángulos
 - COMPARAR: Comparación lado a lado de regiones
 - FILTRAR: Aplicar varios filtros de imagen
-- DETECTAR: Detección de bordes, búsqueda de contornos
+- DETECTAR: Detección de bordes, búsqueda de contornos, segmentación
 - ANÁLISIS DE COLOR: Extraer colores dominantes, histogramas
 - PREPARACIÓN OCR: Pre-procesar para reconocimiento de texto
 """
@@ -304,9 +479,16 @@ except ImportError:
         with open(script_path, "w") as f:
             f.write(script_content)
         
-        # Listar archivos antes de la ejecución
-        files_before = set(os.listdir(self.output_dir))
+        # Listar imágenes antes de ejecutar
+        images_before = set()
+        if os.path.exists(self.output_dir):
+            images_before = {
+                f for f in os.listdir(self.output_dir) 
+                if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'))
+                and not f.startswith('_agent_script')
+            }
         
+        # Ejecutar
         try:
             result = subprocess.run(
                 [sys.executable, script_path],
@@ -316,40 +498,35 @@ except ImportError:
                 cwd=self.output_dir
             )
             
-            stdout = result.stdout
-            stderr = result.stderr
+            stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
             success = result.returncode == 0
             
         except subprocess.TimeoutExpired:
             stdout = ""
-            stderr = "Error: La ejecución del código excedió el límite de tiempo (120s)"
+            stderr = "Error: El código excedió el tiempo límite de 120 segundos"
             success = False
         except Exception as e:
             stdout = ""
-            stderr = f"Error de ejecución: {str(e)}"
+            stderr = f"Error al ejecutar: {str(e)}"
             success = False
-        finally:
-            # Limpiar script temporal
-            try:
-                os.remove(script_path)
-            except:
-                pass
         
-        # Detectar imágenes generadas (solo filenames, no paths completos)
-        files_after = set(os.listdir(self.output_dir))
-        new_files = files_after - files_before
+        # Detectar nuevas imágenes generadas
+        images_after = set()
+        if os.path.exists(self.output_dir):
+            images_after = {
+                f for f in os.listdir(self.output_dir)
+                if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'))
+                and not f.startswith('_agent_script')
+            }
         
-        image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff"}
-        generated_images = sorted([
-            f for f in new_files 
-            if Path(f).suffix.lower() in image_extensions
-        ])
+        new_images = sorted(images_after - images_before)
         
         return {
             "stdout": stdout,
             "stderr": stderr,
             "success": success,
-            "generated_images": generated_images  # Solo filenames
+            "generated_images": new_images  # Solo filenames
         }
 
 
@@ -481,11 +658,16 @@ def _extract_images_and_text(text: str, parts: List[MessagePart]):
 
 
 class VisualAgent:
-    """Agente visual interactivo para procesamiento de imágenes"""
+    """Agente visual interactivo para análisis de imágenes"""
     
-    def __init__(self, sessions_dir: str, config_loader=None):
-        self.sessions_dir = Path(sessions_dir)
+    def __init__(self, base_dir: str = None, config_loader=None):
+        if base_dir is None:
+            base_dir = os.path.expanduser("~/.vision_llm_comparator")
+        
+        self.base_dir = Path(base_dir)
+        self.sessions_dir = self.base_dir / "agent_sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        
         self.config_loader = config_loader
         self.active_sessions: Dict[str, AgentSession] = {}
     
@@ -496,7 +678,7 @@ class VisualAgent:
             image_path=image_path,
             image_name=image_name,
             llm_config_name=llm_config_name,
-            title=title or f"Sesión - {image_name}"
+            title=title or f"Análisis de {image_name}"
         )
         
         # Crear directorio de salida para esta sesión
@@ -639,7 +821,7 @@ class VisualAgent:
             session.messages.append(error_context_msg)
             
             # Crear mensaje de sistema con el error para el retry
-            error_feedback = f"[SISTEMA: El código falló con el siguiente error:\n{error_details}\n\nPor favor analiza el error, corrige el código y vuelve a intentar. NO redefinas IMAGE_PATH ni OUTPUT_DIR, ya están disponibles.]"
+            error_feedback = f"[SISTEMA: El código falló con el siguiente error:\n{error_details}\n\nPor favor analiza el error, corrige el código y vuelve a intentar. NO redefinas IMAGE_PATH ni OUTPUT_DIR, ya están disponibles. RECUERDA: NUNCA uses coordenadas hardcodeadas, siempre detecta con computer vision.]"
             error_msg = AgentMessage(
                 role="user",
                 content=error_feedback,
