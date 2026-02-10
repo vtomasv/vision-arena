@@ -3314,8 +3314,17 @@ HTML_TEMPLATE = """
             }
         })();
 
-        function renderMarkdown(text) {
+        function renderMarkdown(text, sessionId) {
             if (!text) return '';
+            // Resolve image references to agent output URLs
+            // Replace ![caption](filename.png) with proper API URLs
+            if (sessionId || currentAgentSessionId) {
+                const sid = sessionId || currentAgentSessionId;
+                text = text.replace(/!\[([^\]]*)\]\((?!\/|https?:\/\/)([^)]+)\)/g, function(match, alt, src) {
+                    const filename = src.split('/').pop();
+                    return `![${alt}](/api/agent/outputs/${sid}/${filename})`;
+                });
+            }
             if (typeof marked !== 'undefined') {
                 try { return marked.parse(text); } catch(e) { console.error('Markdown parse error:', e); }
             }

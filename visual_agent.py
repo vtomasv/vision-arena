@@ -33,87 +33,103 @@ REQUIRED_PACKAGES = [
     "Pillow", "numpy", "opencv-python-headless", "matplotlib"
 ]
 
-SYSTEM_PROMPT = """You are an advanced Visual Forensic Agent specialized in image analysis and processing.
-You have access to a Python execution environment with the following libraries pre-installed:
-- PIL/Pillow (image manipulation)
-- numpy (numerical operations)  
-- cv2/OpenCV (computer vision)
-- matplotlib (plotting and visualization)
+# Máximo de reintentos automáticos cuando el código falla
+MAX_CODE_RETRIES = 2
 
-WORKFLOW - You MUST follow this structure in every response:
+SYSTEM_PROMPT = """Eres un Agente Visual Forense avanzado especializado en análisis y procesamiento de imágenes.
+Tienes acceso a un entorno de ejecución Python con las siguientes librerías pre-instaladas:
+- PIL/Pillow (manipulación de imágenes)
+- numpy (operaciones numéricas)  
+- cv2/OpenCV (visión por computadora)
+- matplotlib (gráficos y visualización)
 
-## 1. PLAN (Required)
-First, present a brief plan of what you will do. Use a markdown section like:
+IDIOMA: SIEMPRE debes responder en español. Todos los títulos, descripciones, análisis y comentarios deben estar en español.
+
+FLUJO DE TRABAJO - DEBES seguir esta estructura en cada respuesta:
+
+## 1. PLAN (Obligatorio)
+Primero, presenta un plan breve de lo que vas a hacer. Usa una sección markdown como:
 
 ### Plan
-1. [First artifact/step]
-2. [Second artifact/step]
-3. [Expected output]
+1. [Primer artefacto/paso]
+2. [Segundo artefacto/paso]
+3. [Resultado esperado]
 
-## 2. EXECUTION
-Write Python code blocks to perform the operations. Each code block will be automatically executed.
+## 2. EJECUCIÓN
+Escribe bloques de código Python para realizar las operaciones. Cada bloque de código será ejecutado automáticamente.
 
-## 3. RESULTS
-After code execution, present findings using rich Markdown formatting:
-- Use **bold** for emphasis
-- Use tables for structured data
-- Use headers (##, ###) to organize sections
-- Reference generated images using: ![description](filename.png)
+REGLAS IMPORTANTES PARA EL CÓDIGO:
+- La ruta de la imagen de entrada está disponible como IMAGE_PATH (ya inyectada automáticamente)
+- Guarda las imágenes de salida en OUTPUT_DIR (ya inyectado automáticamente)
+- NO redefinas IMAGE_PATH ni OUTPUT_DIR en tu código, ya están disponibles como variables globales
+- Usa nombres descriptivos para las imágenes de salida (ej: "vehiculo_recortado.png", "patente_ampliada.png")
+- Siempre usa `plt.savefig()` en lugar de `plt.show()` para gráficos matplotlib
+- Imprime hallazgos relevantes a stdout - se mostrarán al usuario
+- Maneja errores con try/except
+- SIEMPRE usa `os.path.join(OUTPUT_DIR, "nombre_archivo.png")` para guardar imágenes
+- Cuando uses cv2.imread(), verifica que el resultado no sea None antes de procesarlo
+- Cuando recortes imágenes, verifica las dimensiones antes de hacer el crop
 
-IMPORTANT RULES:
-- The input image path is available as IMAGE_PATH
-- Save output images to OUTPUT_DIR (both are injected automatically)
-- Use descriptive filenames for output images (e.g., "cropped_plate.png", "zoomed_face.png")
-- Always use `plt.savefig()` instead of `plt.show()` for matplotlib plots
-- Print relevant findings to stdout - these will be shown to the user
-- Handle errors gracefully with try/except
-- When analyzing specific regions, provide bounding box coordinates
-- For forensic analysis, maintain image integrity and document all transformations
-- ALWAYS reference output images in your markdown using ![description](filename.png) syntax
-- Use Markdown formatting throughout your response for rich display
+## 3. RESULTADOS
+Después de la ejecución del código, presenta los hallazgos usando formato Markdown enriquecido:
+- Usa **negrita** para énfasis
+- Usa tablas para datos estructurados
+- Usa encabezados (##, ###) para organizar secciones
+- Referencia las imágenes generadas usando: ![descripción](nombre_archivo.png)
 
-RESPONSE FORMAT EXAMPLE:
+EJEMPLO DE FORMATO DE RESPUESTA:
 ```
 ### Plan
-1. Crop the vehicle from the main image
-2. Enhance the license plate region
-3. Analyze and report findings
+1. Recortar el vehículo de la imagen principal
+2. Mejorar la región de la patente
+3. Analizar y reportar hallazgos
 
-Let me start by isolating the vehicle...
+Voy a comenzar aislando el vehículo...
 
 ```python
 import cv2
-# ... code here
+import os
+
+img = cv2.imread(IMAGE_PATH)
+if img is None:
+    print("Error: No se pudo cargar la imagen")
+else:
+    h, w = img.shape[:2]
+    print(f"Imagen cargada: {w}x{h}")
+    # Recortar vehículo
+    vehiculo = img[100:500, 200:600]
+    cv2.imwrite(os.path.join(OUTPUT_DIR, "vehiculo_recortado.png"), vehiculo)
+    print("Vehículo recortado guardado")
 ```
 
-### Results
+### Resultados
 
-The analysis reveals:
+El análisis revela:
 
-| Feature | Value |
-|---------|-------|
-| Vehicle Type | Sedan |
-| Color | Silver |
-| Plate | ABC-123 |
+| Característica | Valor |
+|----------------|-------|
+| Tipo de Vehículo | Sedán |
+| Color | Plateado |
+| Patente | ABC-123 |
 
-![Cropped vehicle](cropped_vehicle.png)
+![Vehículo recortado](vehiculo_recortado.png)
 
-The license plate after enhancement:
+La patente después de la mejora:
 
-![Enhanced plate](enhanced_plate.png)
+![Patente mejorada](patente_mejorada.png)
 ```
 
-You can perform these operations:
-- CROP: Extract specific regions of interest
-- ZOOM: Magnify areas for detailed inspection
-- ENHANCE: Improve contrast, brightness, sharpness
-- ANNOTATE: Add bounding boxes, labels, arrows
-- MEASURE: Calculate dimensions, distances, angles
-- COMPARE: Side-by-side comparison of regions
-- FILTER: Apply various image filters
-- DETECT: Edge detection, contour finding
-- COLOR ANALYSIS: Extract dominant colors, histograms
-- OCR PREPARATION: Pre-process for text recognition
+Operaciones disponibles:
+- RECORTAR: Extraer regiones específicas de interés
+- AMPLIAR: Magnificar áreas para inspección detallada
+- MEJORAR: Mejorar contraste, brillo, nitidez
+- ANOTAR: Agregar cuadros delimitadores, etiquetas, flechas
+- MEDIR: Calcular dimensiones, distancias, ángulos
+- COMPARAR: Comparación lado a lado de regiones
+- FILTRAR: Aplicar varios filtros de imagen
+- DETECTAR: Detección de bordes, búsqueda de contornos
+- ANÁLISIS DE COLOR: Extraer colores dominantes, histogramas
+- PREPARACIÓN OCR: Pre-procesar para reconocimiento de texto
 """
 
 
@@ -306,11 +322,11 @@ except ImportError:
             
         except subprocess.TimeoutExpired:
             stdout = ""
-            stderr = "Error: Code execution timed out (120s limit)"
+            stderr = "Error: La ejecución del código excedió el límite de tiempo (120s)"
             success = False
         except Exception as e:
             stdout = ""
-            stderr = f"Error executing code: {str(e)}"
+            stderr = f"Error de ejecución: {str(e)}"
             success = False
         finally:
             # Limpiar script temporal
@@ -350,7 +366,6 @@ def parse_response_to_parts(raw_content: str, code_results: List[Dict], session_
     parts = []
     
     # Dividir el contenido en segmentos: texto y bloques de código
-    # Pattern: captura texto antes de un bloque de código, luego el bloque
     segments = re.split(r'(```(?:python|py)?\s*\n.*?\n```)', raw_content, flags=re.DOTALL)
     
     code_idx = 0  # Índice para mapear con code_results
@@ -401,7 +416,7 @@ def parse_response_to_parts(raw_content: str, code_results: List[Dict], session_
 
 
 def _parse_text_segment(text: str) -> List[MessagePart]:
-    """Parsea un segmento de texto markdown en partes."""
+    """Parsea un segmento de texto markdown en partes, extrayendo imágenes inline."""
     parts = []
     
     # Detectar si contiene una sección de plan
@@ -412,7 +427,7 @@ def _parse_text_segment(text: str) -> List[MessagePart]:
         # Texto antes del plan
         before = text[:plan_match.start()].strip()
         if before:
-            parts.append(MessagePart(type="text", content=before))
+            _extract_images_and_text(before, parts)
         
         # El plan
         plan_content = (plan_match.group(1) + plan_match.group(2)).strip()
@@ -421,13 +436,48 @@ def _parse_text_segment(text: str) -> List[MessagePart]:
         # Texto después del plan
         after = text[plan_match.end():].strip()
         if after:
-            parts.append(MessagePart(type="text", content=after))
+            _extract_images_and_text(after, parts)
     else:
-        # Sin plan detectado, todo es texto
+        # Sin plan detectado
         if text.strip():
-            parts.append(MessagePart(type="text", content=text.strip()))
+            _extract_images_and_text(text.strip(), parts)
     
     return parts
+
+
+def _extract_images_and_text(text: str, parts: List[MessagePart]):
+    """
+    Extrae referencias a imágenes ![caption](filename) del texto markdown
+    y las convierte en partes de tipo 'image' separadas, dejando el texto restante
+    como partes de tipo 'text'.
+    """
+    # Pattern para imágenes markdown: ![caption](filename)
+    img_pattern = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+    
+    last_end = 0
+    for match in img_pattern.finditer(text):
+        # Texto antes de la imagen
+        before_text = text[last_end:match.start()].strip()
+        if before_text:
+            parts.append(MessagePart(type="text", content=before_text))
+        
+        # La imagen
+        caption = match.group(1)
+        filename = match.group(2)
+        # Limpiar el filename - solo quedarnos con el nombre del archivo
+        clean_filename = os.path.basename(filename)
+        parts.append(MessagePart(
+            type="image",
+            filename=clean_filename,
+            caption=caption or clean_filename.replace("_", " ").replace(".png", "").replace(".jpg", "").title()
+        ))
+        
+        last_end = match.end()
+    
+    # Texto restante después de la última imagen
+    remaining = text[last_end:].strip()
+    if remaining:
+        parts.append(MessagePart(type="text", content=remaining))
 
 
 class VisualAgent:
@@ -446,7 +496,7 @@ class VisualAgent:
             image_path=image_path,
             image_name=image_name,
             llm_config_name=llm_config_name,
-            title=title or f"Session - {image_name}"
+            title=title or f"Sesión - {image_name}"
         )
         
         # Crear directorio de salida para esta sesión
@@ -456,8 +506,8 @@ class VisualAgent:
         # Mensaje de sistema
         system_msg = AgentMessage(
             role="system",
-            content=f"Session started. Analyzing image: {image_name}",
-            parts=[MessagePart(type="text", content=f"Session started. Analyzing image: **{image_name}**")]
+            content=f"Sesión iniciada. Analizando imagen: {image_name}",
+            parts=[MessagePart(type="text", content=f"Sesión iniciada. Analizando imagen: **{image_name}**")]
         )
         session.messages.append(system_msg)
         
@@ -471,15 +521,16 @@ class VisualAgent:
         """
         Envía un mensaje al agente y obtiene la respuesta.
         Parsea la respuesta en partes estructuradas para renderizado rico.
+        Implementa auto-retry cuando el código falla.
         """
         session = self._get_session(session_id)
         if not session:
-            raise ValueError(f"Session not found: {session_id}")
+            raise ValueError(f"Sesión no encontrada: {session_id}")
         
         if search_image_path and os.path.exists(search_image_path):
             session.image_path = search_image_path
             session.image_name = os.path.basename(search_image_path)
-            user_message = f"[Image loaded from search: {session.image_name}]\n\n{user_message}"
+            user_message = f"[Imagen cargada desde búsqueda: {session.image_name}]\n\n{user_message}"
         
         # Agregar mensaje del usuario
         user_msg = AgentMessage(
@@ -491,28 +542,43 @@ class VisualAgent:
         
         # Obtener configuración LLM
         if not self.config_loader:
-            raise ValueError("config_loader is required")
+            raise ValueError("config_loader es requerido")
         
         llm_config = self.config_loader(session.llm_config_name)
         if not llm_config:
-            raise ValueError(f"LLM config not found: {session.llm_config_name}")
+            raise ValueError(f"Configuración LLM no encontrada: {session.llm_config_name}")
         
-        # Construir historial de conversación para el LLM
+        # Ejecutar con auto-retry
+        assistant_msg = await self._execute_with_retry(session, llm_config, user_message)
+        
+        session.messages.append(assistant_msg)
+        self._save_session(session)
+        
+        return assistant_msg
+    
+    async def _execute_with_retry(self, session: AgentSession, llm_config, 
+                                   user_message: str, retry_count: int = 0) -> AgentMessage:
+        """
+        Ejecuta la interacción con el LLM y reintenta automáticamente si el código falla.
+        Acumula todas las partes (intentos fallidos + intento exitoso) en un solo mensaje.
+        """
+        # Construir prompt de conversación
         conversation_prompt = self._build_conversation_prompt(session, user_message)
+        
+        # Si es un reintento, agregar contexto del error
+        if retry_count > 0:
+            conversation_prompt += f"\n\n[SISTEMA: El código anterior falló. Por favor corrige el error y vuelve a intentar. Intento {retry_count + 1} de {MAX_CODE_RETRIES + 1}.]"
         
         # Llamar al LLM
         provider = create_provider(llm_config)
         response = await provider.analyze_image(session.image_path, conversation_prompt)
         
         if not response.success:
-            error_msg = AgentMessage(
+            return AgentMessage(
                 role="assistant",
-                content=f"Error communicating with LLM: {response.error}",
-                parts=[MessagePart(type="error", content=f"Error communicating with LLM: {response.error}")]
+                content=f"Error al comunicarse con el LLM: {response.error}",
+                parts=[MessagePart(type="error", content=f"Error al comunicarse con el LLM: {response.error}")]
             )
-            session.messages.append(error_msg)
-            self._save_session(session)
-            return error_msg
         
         # Procesar la respuesta - buscar bloques de código Python
         assistant_content = response.content
@@ -520,6 +586,8 @@ class VisualAgent:
         
         all_generated_images = []
         all_code_results = []
+        has_code_error = False
+        error_details = ""
         
         if code_blocks:
             executor = CodeExecutor(session.output_dir)
@@ -531,25 +599,67 @@ class VisualAgent:
                 if result["stdout"]:
                     output_text += result["stdout"]
                 if result["stderr"] and not result["success"]:
-                    output_text += f"\nError:\n{result['stderr']}"
+                    if output_text:
+                        output_text += "\n"
+                    output_text += f"Error:\n{result['stderr']}"
+                    has_code_error = True
+                    error_details = result["stderr"]
                 
                 all_code_results.append({
                     "code": code,
                     "output": output_text,
                     "success": result["success"],
-                    "images": result["generated_images"]  # Solo filenames
+                    "images": result["generated_images"]
                 })
                 
                 all_generated_images.extend(result["generated_images"])
         
+        # Si hay error en el código y no hemos agotado los reintentos, reintentar
+        if has_code_error and retry_count < MAX_CODE_RETRIES:
+            # Construir partes del intento fallido
+            failed_parts = parse_response_to_parts(assistant_content, all_code_results, session.id)
+            
+            # Agregar una nota de reintento
+            retry_note = MessagePart(
+                type="text",
+                content=f"\n\n---\n**Reintentando automáticamente** (intento {retry_count + 2}/{MAX_CODE_RETRIES + 1})...\n\n---\n"
+            )
+            
+            # Agregar el intento fallido al historial de la sesión como contexto
+            # para que el LLM sepa qué falló
+            error_context_msg = AgentMessage(
+                role="assistant",
+                content=assistant_content,
+                parts=failed_parts,
+                images=all_generated_images,
+                code="\n\n".join(code_blocks),
+                code_output=error_details,
+                code_success=False
+            )
+            session.messages.append(error_context_msg)
+            
+            # Crear mensaje de sistema con el error para el retry
+            error_feedback = f"[SISTEMA: El código falló con el siguiente error:\n{error_details}\n\nPor favor analiza el error, corrige el código y vuelve a intentar. NO redefinas IMAGE_PATH ni OUTPUT_DIR, ya están disponibles.]"
+            error_msg = AgentMessage(
+                role="user",
+                content=error_feedback,
+                parts=[MessagePart(type="text", content=error_feedback)]
+            )
+            session.messages.append(error_msg)
+            
+            # Reintentar
+            retry_result = await self._execute_with_retry(
+                session, llm_config, error_feedback, retry_count + 1
+            )
+            
+            return retry_result
+        
         # Parsear la respuesta en partes estructuradas
         parts = parse_response_to_parts(assistant_content, all_code_results, session.id)
         
-        # Agregar imágenes que el LLM referencia con ![...](...) pero que no están en code_results
-        # (imágenes referenciadas en el texto que ya fueron generadas)
+        # Recopilar todas las imágenes referenciadas en el markdown
         image_refs = re.findall(r'!\[([^\]]*)\]\(([^)]+)\)', assistant_content)
         for caption, filename in image_refs:
-            # Verificar si la imagen existe en el output_dir
             clean_filename = os.path.basename(filename)
             img_path = os.path.join(session.output_dir, clean_filename)
             if os.path.exists(img_path) and clean_filename not in all_generated_images:
@@ -560,26 +670,23 @@ class VisualAgent:
             role="assistant",
             content=assistant_content,
             parts=parts,
-            images=all_generated_images,  # Solo filenames
+            images=all_generated_images,
             code="\n\n".join(code_blocks) if code_blocks else "",
             code_output="\n---\n".join(
-                [f"[Block {i+1}] {'OK' if co['success'] else 'ERROR'}\n{co['output']}" 
+                [f"[Bloque {i+1}] {'OK' if co['success'] else 'ERROR'}\n{co['output']}" 
                  for i, co in enumerate(all_code_results)]
             ) if all_code_results else "",
             code_success=all(co["success"] for co in all_code_results) if all_code_results else True
         )
-        
-        session.messages.append(assistant_msg)
-        self._save_session(session)
         
         return assistant_msg
     
     def _build_conversation_prompt(self, session: AgentSession, current_message: str) -> str:
         """Construye el prompt de conversación incluyendo historial"""
         parts = [SYSTEM_PROMPT]
-        parts.append(f"\nCurrent image: {session.image_name}")
-        parts.append(f"Image path: {session.image_path}")
-        parts.append(f"Output directory: {session.output_dir}\n")
+        parts.append(f"\nImagen actual: {session.image_name}")
+        parts.append(f"Ruta de imagen: {session.image_path}")
+        parts.append(f"Directorio de salida: {session.output_dir}\n")
         
         # Incluir historial relevante (últimos N mensajes)
         recent_messages = session.messages[-20:]
@@ -588,16 +695,16 @@ class VisualAgent:
             if msg.role == "system":
                 continue
             elif msg.role == "user":
-                parts.append(f"\nUser: {msg.content}")
+                parts.append(f"\nUsuario: {msg.content}")
             elif msg.role == "assistant":
-                parts.append(f"\nAssistant: {msg.content}")
+                parts.append(f"\nAsistente: {msg.content}")
                 if msg.code_output:
-                    parts.append(f"\n[Code execution output: {msg.code_output}]")
+                    parts.append(f"\n[Salida de ejecución de código: {msg.code_output}]")
                 if msg.images:
-                    parts.append(f"\n[Generated images: {', '.join(msg.images)}]")
+                    parts.append(f"\n[Imágenes generadas: {', '.join(msg.images)}]")
         
-        parts.append(f"\nUser: {current_message}")
-        parts.append("\nAssistant:")
+        parts.append(f"\nUsuario: {current_message}")
+        parts.append("\nAsistente:")
         
         return "\n".join(parts)
     
@@ -684,7 +791,7 @@ class VisualAgent:
         for i, msg in enumerate(session.messages):
             if msg.role in ("user", "assistant"):
                 step_results.append({
-                    "step_name": f"{'User Query' if msg.role == 'user' else 'Agent Response'} #{i}",
+                    "step_name": f"{'Consulta del Usuario' if msg.role == 'user' else 'Respuesta del Agente'} #{i}",
                     "step_order": i,
                     "prompt_used": msg.content if msg.role == "user" else "",
                     "content": msg.content if msg.role == "assistant" else msg.content,
@@ -701,7 +808,7 @@ class VisualAgent:
         
         execution_data = {
             "id": session.id,
-            "pipeline_name": f"Agent Session: {session.title}",
+            "pipeline_name": f"Sesión de Agente: {session.title}",
             "image_path": session.image_path,
             "image_name": session.image_name,
             "step_results": step_results,
