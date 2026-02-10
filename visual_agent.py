@@ -2,6 +2,9 @@
 Visual Agent Module - Agente interactivo especializado en tratamiento de imágenes.
 Puede ejecutar código Python sobre imágenes, ampliarlas, cortarlas, analizar regiones,
 y generar documentos firmados con los resultados.
+
+El agente planifica artefactos antes de ejecutar, y devuelve mensajes estructurados
+con partes (plan, texto markdown, código, imágenes, resultados) para renderizado rico.
 """
 
 import asyncio
@@ -33,33 +36,72 @@ REQUIRED_PACKAGES = [
 SYSTEM_PROMPT = """You are an advanced Visual Forensic Agent specialized in image analysis and processing.
 You have access to a Python execution environment with the following libraries pre-installed:
 - PIL/Pillow (image manipulation)
-- numpy (numerical operations)
+- numpy (numerical operations)  
 - cv2/OpenCV (computer vision)
 - matplotlib (plotting and visualization)
 
-When the user asks you to analyze, crop, zoom, enhance, or manipulate an image, you MUST:
-1. Write Python code to perform the requested operation
-2. Wrap your code in a ```python code block
-3. The code will be automatically executed
-4. Save any output images to the specified output directory
-5. Reference the output images in your response
+WORKFLOW - You MUST follow this structure in every response:
+
+## 1. PLAN (Required)
+First, present a brief plan of what you will do. Use a markdown section like:
+
+### Plan
+1. [First artifact/step]
+2. [Second artifact/step]
+3. [Expected output]
+
+## 2. EXECUTION
+Write Python code blocks to perform the operations. Each code block will be automatically executed.
+
+## 3. RESULTS
+After code execution, present findings using rich Markdown formatting:
+- Use **bold** for emphasis
+- Use tables for structured data
+- Use headers (##, ###) to organize sections
+- Reference generated images using: ![description](filename.png)
 
 IMPORTANT RULES:
-- The input image path will be provided as the variable IMAGE_PATH
-- Save output images to OUTPUT_DIR (both will be injected into your code)
+- The input image path is available as IMAGE_PATH
+- Save output images to OUTPUT_DIR (both are injected automatically)
 - Use descriptive filenames for output images (e.g., "cropped_plate.png", "zoomed_face.png")
 - Always use `plt.savefig()` instead of `plt.show()` for matplotlib plots
-- Print any relevant findings to stdout
-- If you need to install additional packages, use: subprocess.check_call([sys.executable, "-m", "pip", "install", "package_name"])
-- Always handle errors gracefully
+- Print relevant findings to stdout - these will be shown to the user
+- Handle errors gracefully with try/except
 - When analyzing specific regions, provide bounding box coordinates
 - For forensic analysis, maintain image integrity and document all transformations
+- ALWAYS reference output images in your markdown using ![description](filename.png) syntax
+- Use Markdown formatting throughout your response for rich display
 
-RESPONSE FORMAT:
-- Explain what you're doing in natural language
-- Include Python code blocks for image operations
-- After code execution, describe the results
-- Reference any generated images by their filenames
+RESPONSE FORMAT EXAMPLE:
+```
+### Plan
+1. Crop the vehicle from the main image
+2. Enhance the license plate region
+3. Analyze and report findings
+
+Let me start by isolating the vehicle...
+
+```python
+import cv2
+# ... code here
+```
+
+### Results
+
+The analysis reveals:
+
+| Feature | Value |
+|---------|-------|
+| Vehicle Type | Sedan |
+| Color | Silver |
+| Plate | ABC-123 |
+
+![Cropped vehicle](cropped_vehicle.png)
+
+The license plate after enhancement:
+
+![Enhanced plate](enhanced_plate.png)
+```
 
 You can perform these operations:
 - CROP: Extract specific regions of interest
@@ -76,14 +118,50 @@ You can perform these operations:
 
 
 @dataclass
+class MessagePart:
+    """Una parte estructurada de un mensaje del agente"""
+    type: str  # "plan", "text", "code", "code_output", "image", "error"
+    content: str = ""
+    language: str = "python"  # Para bloques de código
+    output: str = ""  # Salida del código
+    success: bool = True  # Si el código se ejecutó correctamente
+    filename: str = ""  # Para imágenes
+    caption: str = ""  # Para imágenes
+    
+    def to_dict(self) -> Dict[str, Any]:
+        d = {"type": self.type, "content": self.content}
+        if self.type == "code":
+            d["language"] = self.language
+            d["output"] = self.output
+            d["success"] = self.success
+        elif self.type == "image":
+            d["filename"] = self.filename
+            d["caption"] = self.caption
+        return d
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MessagePart":
+        return cls(
+            type=data.get("type", "text"),
+            content=data.get("content", ""),
+            language=data.get("language", "python"),
+            output=data.get("output", ""),
+            success=data.get("success", True),
+            filename=data.get("filename", ""),
+            caption=data.get("caption", "")
+        )
+
+
+@dataclass
 class AgentMessage:
     """Mensaje en la conversación del agente"""
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    role: str = "user"  # user, assistant, system, code_output, image_output
-    content: str = ""
-    images: List[str] = field(default_factory=list)  # Paths de imágenes generadas
-    code: str = ""  # Código Python ejecutado
-    code_output: str = ""  # Salida del código
+    role: str = "user"  # user, assistant, system
+    content: str = ""  # Contenido raw (markdown) para compatibilidad
+    parts: List[MessagePart] = field(default_factory=list)  # Partes estructuradas
+    images: List[str] = field(default_factory=list)  # Filenames de imágenes generadas
+    code: str = ""  # Código Python ejecutado (legacy)
+    code_output: str = ""  # Salida del código (legacy)
     code_success: bool = True
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     
@@ -92,6 +170,7 @@ class AgentMessage:
             "id": self.id,
             "role": self.role,
             "content": self.content,
+            "parts": [p.to_dict() for p in self.parts],
             "images": self.images,
             "code": self.code,
             "code_output": self.code_output,
@@ -101,7 +180,18 @@ class AgentMessage:
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentMessage":
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        msg = cls(
+            id=data.get("id", str(uuid.uuid4())),
+            role=data.get("role", "user"),
+            content=data.get("content", ""),
+            images=data.get("images", []),
+            code=data.get("code", ""),
+            code_output=data.get("code_output", ""),
+            code_success=data.get("code_success", True),
+            timestamp=data.get("timestamp", "")
+        )
+        msg.parts = [MessagePart.from_dict(p) for p in data.get("parts", [])]
+        return msg
 
 
 @dataclass
@@ -157,7 +247,7 @@ class CodeExecutor:
         Ejecuta código Python con acceso a la imagen.
         
         Returns:
-            Dict con stdout, stderr, success, generated_images
+            Dict con stdout, stderr, success, generated_images (filenames only)
         """
         # Crear script temporal
         script_content = f'''
@@ -229,23 +319,115 @@ except ImportError:
             except:
                 pass
         
-        # Detectar imágenes generadas
+        # Detectar imágenes generadas (solo filenames, no paths completos)
         files_after = set(os.listdir(self.output_dir))
         new_files = files_after - files_before
         
         image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff"}
-        generated_images = [
-            os.path.join(self.output_dir, f) 
-            for f in sorted(new_files) 
+        generated_images = sorted([
+            f for f in new_files 
             if Path(f).suffix.lower() in image_extensions
-        ]
+        ])
         
         return {
             "stdout": stdout,
             "stderr": stderr,
             "success": success,
-            "generated_images": generated_images
+            "generated_images": generated_images  # Solo filenames
         }
+
+
+def parse_response_to_parts(raw_content: str, code_results: List[Dict], session_id: str) -> List[MessagePart]:
+    """
+    Parsea la respuesta raw del LLM en partes estructuradas.
+    
+    Identifica:
+    - Bloques de código Python (```python ... ```)
+    - Referencias a imágenes (![...](filename.png))
+    - Secciones de plan (### Plan, ## Plan)
+    - Texto markdown regular
+    """
+    parts = []
+    
+    # Dividir el contenido en segmentos: texto y bloques de código
+    # Pattern: captura texto antes de un bloque de código, luego el bloque
+    segments = re.split(r'(```(?:python|py)?\s*\n.*?\n```)', raw_content, flags=re.DOTALL)
+    
+    code_idx = 0  # Índice para mapear con code_results
+    
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+        
+        # Es un bloque de código?
+        code_match = re.match(r'```(?:python|py)?\s*\n(.*?)\n```', segment, re.DOTALL)
+        if code_match:
+            code_content = code_match.group(1).strip()
+            
+            # Buscar resultado de ejecución correspondiente
+            output = ""
+            success = True
+            code_images = []
+            if code_idx < len(code_results):
+                cr = code_results[code_idx]
+                output = cr.get("output", "")
+                success = cr.get("success", True)
+                code_images = cr.get("images", [])
+                code_idx += 1
+            
+            # Agregar parte de código
+            parts.append(MessagePart(
+                type="code",
+                content=code_content,
+                language="python",
+                output=output,
+                success=success
+            ))
+            
+            # Agregar imágenes generadas por este bloque de código
+            for img_filename in code_images:
+                parts.append(MessagePart(
+                    type="image",
+                    filename=img_filename,
+                    caption=img_filename.replace("_", " ").replace(".png", "").replace(".jpg", "").title()
+                ))
+        else:
+            # Es texto markdown - procesar sub-secciones
+            text_parts = _parse_text_segment(segment)
+            parts.extend(text_parts)
+    
+    return parts
+
+
+def _parse_text_segment(text: str) -> List[MessagePart]:
+    """Parsea un segmento de texto markdown en partes."""
+    parts = []
+    
+    # Detectar si contiene una sección de plan
+    plan_match = re.search(r'(#{1,3}\s*(?:Plan|Planificación|Planning)\s*\n)(.*?)(?=\n#{1,3}\s|\Z)', 
+                           text, re.DOTALL | re.IGNORECASE)
+    
+    if plan_match:
+        # Texto antes del plan
+        before = text[:plan_match.start()].strip()
+        if before:
+            parts.append(MessagePart(type="text", content=before))
+        
+        # El plan
+        plan_content = (plan_match.group(1) + plan_match.group(2)).strip()
+        parts.append(MessagePart(type="plan", content=plan_content))
+        
+        # Texto después del plan
+        after = text[plan_match.end():].strip()
+        if after:
+            parts.append(MessagePart(type="text", content=after))
+    else:
+        # Sin plan detectado, todo es texto
+        if text.strip():
+            parts.append(MessagePart(type="text", content=text.strip()))
+    
+    return parts
 
 
 class VisualAgent:
@@ -274,7 +456,8 @@ class VisualAgent:
         # Mensaje de sistema
         system_msg = AgentMessage(
             role="system",
-            content=f"Session started. Analyzing image: {image_name}"
+            content=f"Session started. Analyzing image: {image_name}",
+            parts=[MessagePart(type="text", content=f"Session started. Analyzing image: **{image_name}**")]
         )
         session.messages.append(system_msg)
         
@@ -287,24 +470,23 @@ class VisualAgent:
                            search_image_path: str = None) -> AgentMessage:
         """
         Envía un mensaje al agente y obtiene la respuesta.
-        
-        Args:
-            session_id: ID de la sesión
-            user_message: Mensaje del usuario
-            search_image_path: Path de imagen seleccionada desde búsqueda semántica
+        Parsea la respuesta en partes estructuradas para renderizado rico.
         """
         session = self._get_session(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
         
-        # Si se proporcionó una imagen desde búsqueda, actualizar la sesión
         if search_image_path and os.path.exists(search_image_path):
             session.image_path = search_image_path
             session.image_name = os.path.basename(search_image_path)
             user_message = f"[Image loaded from search: {session.image_name}]\n\n{user_message}"
         
         # Agregar mensaje del usuario
-        user_msg = AgentMessage(role="user", content=user_message)
+        user_msg = AgentMessage(
+            role="user", 
+            content=user_message,
+            parts=[MessagePart(type="text", content=user_message)]
+        )
         session.messages.append(user_msg)
         
         # Obtener configuración LLM
@@ -325,7 +507,8 @@ class VisualAgent:
         if not response.success:
             error_msg = AgentMessage(
                 role="assistant",
-                content=f"Error communicating with LLM: {response.error}"
+                content=f"Error communicating with LLM: {response.error}",
+                parts=[MessagePart(type="error", content=f"Error communicating with LLM: {response.error}")]
             )
             session.messages.append(error_msg)
             self._save_session(session)
@@ -333,10 +516,10 @@ class VisualAgent:
         
         # Procesar la respuesta - buscar bloques de código Python
         assistant_content = response.content
-        code_blocks = re.findall(r'```python\s*(.*?)\s*```', assistant_content, re.DOTALL)
+        code_blocks = re.findall(r'```(?:python|py)?\s*\n(.*?)\n```', assistant_content, re.DOTALL)
         
         all_generated_images = []
-        all_code_outputs = []
+        all_code_results = []
         
         if code_blocks:
             executor = CodeExecutor(session.output_dir)
@@ -350,26 +533,40 @@ class VisualAgent:
                 if result["stderr"] and not result["success"]:
                     output_text += f"\nError:\n{result['stderr']}"
                 
-                all_code_outputs.append({
+                all_code_results.append({
                     "code": code,
                     "output": output_text,
                     "success": result["success"],
-                    "images": result["generated_images"]
+                    "images": result["generated_images"]  # Solo filenames
                 })
                 
                 all_generated_images.extend(result["generated_images"])
+        
+        # Parsear la respuesta en partes estructuradas
+        parts = parse_response_to_parts(assistant_content, all_code_results, session.id)
+        
+        # Agregar imágenes que el LLM referencia con ![...](...) pero que no están en code_results
+        # (imágenes referenciadas en el texto que ya fueron generadas)
+        image_refs = re.findall(r'!\[([^\]]*)\]\(([^)]+)\)', assistant_content)
+        for caption, filename in image_refs:
+            # Verificar si la imagen existe en el output_dir
+            clean_filename = os.path.basename(filename)
+            img_path = os.path.join(session.output_dir, clean_filename)
+            if os.path.exists(img_path) and clean_filename not in all_generated_images:
+                all_generated_images.append(clean_filename)
         
         # Crear mensaje de respuesta del asistente
         assistant_msg = AgentMessage(
             role="assistant",
             content=assistant_content,
-            images=all_generated_images,
+            parts=parts,
+            images=all_generated_images,  # Solo filenames
             code="\n\n".join(code_blocks) if code_blocks else "",
             code_output="\n---\n".join(
                 [f"[Block {i+1}] {'OK' if co['success'] else 'ERROR'}\n{co['output']}" 
-                 for i, co in enumerate(all_code_outputs)]
-            ) if all_code_outputs else "",
-            code_success=all(co["success"] for co in all_code_outputs) if all_code_outputs else True
+                 for i, co in enumerate(all_code_results)]
+            ) if all_code_results else "",
+            code_success=all(co["success"] for co in all_code_results) if all_code_results else True
         )
         
         session.messages.append(assistant_msg)
@@ -385,7 +582,7 @@ class VisualAgent:
         parts.append(f"Output directory: {session.output_dir}\n")
         
         # Incluir historial relevante (últimos N mensajes)
-        recent_messages = session.messages[-20:]  # Últimos 20 mensajes
+        recent_messages = session.messages[-20:]
         
         for msg in recent_messages:
             if msg.role == "system":
@@ -397,7 +594,7 @@ class VisualAgent:
                 if msg.code_output:
                     parts.append(f"\n[Code execution output: {msg.code_output}]")
                 if msg.images:
-                    parts.append(f"\n[Generated images: {', '.join(os.path.basename(p) for p in msg.images)}]")
+                    parts.append(f"\n[Generated images: {', '.join(msg.images)}]")
         
         parts.append(f"\nUser: {current_message}")
         parts.append("\nAssistant:")

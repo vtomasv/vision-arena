@@ -888,6 +888,11 @@ HTML_TEMPLATE = """
     <title>Vision LLM Comparator</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Markdown rendering and syntax highlighting -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
     <style>
         :root {
             --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -1040,6 +1045,44 @@ HTML_TEMPLATE = """
             color: #666;
             margin-top: 0.25rem;
         }
+        /* Agent Chat Markdown Styles */
+        .agent-msg { max-width: 85%; padding: 1rem 1.25rem; border-radius: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .agent-msg-user { background: linear-gradient(135deg, #e3f2fd, #bbdefb); margin-left: auto; border-bottom-right-radius: 4px; }
+        .agent-msg-assistant { background: #ffffff; border: 1px solid #e8e8e8; border-bottom-left-radius: 4px; }
+        .agent-msg-system { background: #f0f4f8; text-align: center; max-width: 100%; font-size: 0.85rem; color: #666; padding: 0.5rem 1rem; border-radius: 8px; }
+        .agent-msg-error { background: #fff5f5; border: 1px solid #f14668; }
+        .agent-msg .md-content h1, .agent-msg .md-content h2, .agent-msg .md-content h3 { margin-top: 0.75rem; margin-bottom: 0.5rem; color: #363636; }
+        .agent-msg .md-content h1 { font-size: 1.3rem; }
+        .agent-msg .md-content h2 { font-size: 1.15rem; }
+        .agent-msg .md-content h3 { font-size: 1.05rem; }
+        .agent-msg .md-content p { margin-bottom: 0.5rem; line-height: 1.6; }
+        .agent-msg .md-content ul, .agent-msg .md-content ol { margin-left: 1.5rem; margin-bottom: 0.5rem; }
+        .agent-msg .md-content li { margin-bottom: 0.25rem; }
+        .agent-msg .md-content table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 0.9rem; }
+        .agent-msg .md-content table th { background: #f5f5f5; padding: 0.5rem 0.75rem; border: 1px solid #ddd; text-align: left; font-weight: 600; }
+        .agent-msg .md-content table td { padding: 0.5rem 0.75rem; border: 1px solid #ddd; }
+        .agent-msg .md-content table tr:nth-child(even) { background: #fafafa; }
+        .agent-msg .md-content strong { color: #363636; }
+        .agent-msg .md-content em { color: #555; }
+        .agent-msg .md-content blockquote { border-left: 4px solid #667eea; padding: 0.5rem 1rem; margin: 0.5rem 0; background: #f8f9ff; }
+        .agent-msg .md-content img { max-width: 100%; border-radius: 8px; margin: 0.5rem 0; cursor: pointer; border: 2px solid #eee; transition: border-color 0.2s; }
+        .agent-msg .md-content img:hover { border-color: #667eea; }
+        .agent-msg .md-content code:not(pre code) { background: #f0f0f0; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85em; color: #e74c3c; }
+        .agent-msg .md-content pre { margin: 0.75rem 0; border-radius: 8px; overflow: hidden; }
+        .agent-msg .md-content pre code { font-size: 0.85rem; line-height: 1.5; }
+        .agent-plan { background: linear-gradient(135deg, #f0f4ff, #e8ecff); border: 1px solid #c5cae9; border-radius: 10px; padding: 1rem; margin: 0.5rem 0; }
+        .agent-plan::before { content: '\f0ae  Plan'; font-family: 'Font Awesome 6 Free'; font-weight: 900; display: block; font-size: 0.8rem; color: #667eea; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.5rem; }
+        .agent-code-block { margin: 0.75rem 0; border-radius: 10px; overflow: hidden; border: 1px solid #2d2d2d; }
+        .agent-code-header { background: #1e1e2e; color: #cdd6f4; padding: 0.4rem 0.75rem; font-size: 0.75rem; display: flex; justify-content: space-between; align-items: center; }
+        .agent-code-header .lang-badge { background: #45475a; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.7rem; }
+        .agent-code-output { background: #1a1b26; color: #a9b1d6; padding: 0.75rem; font-family: 'Fira Code', 'Cascadia Code', monospace; font-size: 0.8rem; border-top: 1px solid #333; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; }
+        .agent-code-output.success { border-left: 3px solid #48c774; }
+        .agent-code-output.error { border-left: 3px solid #f14668; color: #f7768e; }
+        .agent-image-output { margin: 0.75rem 0; text-align: center; }
+        .agent-image-output img { max-width: 100%; max-height: 500px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); cursor: pointer; transition: transform 0.2s; }
+        .agent-image-output img:hover { transform: scale(1.02); }
+        .agent-image-caption { font-size: 0.8rem; color: #888; margin-top: 0.25rem; }
+        .agent-msg-meta { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-size: 0.75rem; color: #999; }
     </style>
 </head>
 <body>
@@ -1732,7 +1775,7 @@ HTML_TEMPLATE = """
                                 </button>
                             </div>
                         </header>
-                        <div class="card-content" id="agent-chat-messages" style="height:500px;overflow-y:auto;background:#f9f9f9;border-radius:8px">
+                        <div class="card-content" id="agent-chat-messages" style="height:600px;overflow-y:auto;background:#f5f6fa;border-radius:8px;padding:1.5rem;display:flex;flex-direction:column;gap:0.75rem">
                         </div>
                         <footer class="card-footer" style="padding:1rem">
                             <div class="field has-addons" style="width:100%">
@@ -3252,50 +3295,144 @@ HTML_TEMPLATE = """
             }
         }
 
+        // Configure marked.js for rendering
+        (function() {
+            if (typeof marked !== 'undefined') {
+                marked.setOptions({
+                    breaks: true,
+                    gfm: true,
+                    highlight: function(code, lang) {
+                        if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
+                            try { return hljs.highlight(code, {language: lang}).value; } catch(e) {}
+                        }
+                        if (typeof hljs !== 'undefined') {
+                            try { return hljs.highlightAuto(code).value; } catch(e) {}
+                        }
+                        return code;
+                    }
+                });
+            }
+        })();
+
+        function renderMarkdown(text) {
+            if (!text) return '';
+            if (typeof marked !== 'undefined') {
+                try { return marked.parse(text); } catch(e) { console.error('Markdown parse error:', e); }
+            }
+            // Fallback: basic escaping with pre-wrap
+            return '<div style="white-space:pre-wrap">' + text.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+        }
+
+        function renderAgentMessageParts(msg) {
+            // If message has structured parts, render them
+            if (msg.parts && msg.parts.length > 0) {
+                return msg.parts.map(part => {
+                    switch(part.type) {
+                        case 'plan':
+                            return `<div class="agent-plan"><div class="md-content">${renderMarkdown(part.content)}</div></div>`;
+                        
+                        case 'code':
+                            let codeHtml = `<div class="agent-code-block">`;
+                            codeHtml += `<div class="agent-code-header"><span><i class="fas fa-code mr-1"></i> Código ejecutado</span><span class="lang-badge">${part.language || 'python'}</span></div>`;
+                            // Render code with syntax highlighting
+                            let highlightedCode = part.content;
+                            if (typeof hljs !== 'undefined') {
+                                try { highlightedCode = hljs.highlight(part.content, {language: part.language || 'python'}).value; } catch(e) {}
+                            }
+                            codeHtml += `<pre style="margin:0;background:#1e1e2e;padding:0"><code class="hljs" style="padding:0.75rem;display:block;overflow-x:auto">${highlightedCode}</code></pre>`;
+                            // Show output if any
+                            if (part.output) {
+                                const outputClass = part.success !== false ? 'success' : 'error';
+                                const icon = part.success !== false ? 'fa-check-circle has-text-success' : 'fa-times-circle has-text-danger';
+                                codeHtml += `<div class="agent-code-output ${outputClass}"><i class="fas ${icon} mr-1"></i>${part.output.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+                            }
+                            codeHtml += `</div>`;
+                            return codeHtml;
+                        
+                        case 'image':
+                            const imgUrl = `/api/agent/outputs/${currentAgentSessionId}/${part.filename}`;
+                            return `<div class="agent-image-output">
+                                <img src="${imgUrl}" onclick="window.open(this.src,'_blank')" alt="${part.caption || part.filename}" loading="lazy">
+                                <div class="agent-image-caption"><i class="fas fa-image mr-1"></i>${part.caption || part.filename}</div>
+                            </div>`;
+                        
+                        case 'error':
+                            return `<div class="notification is-danger is-light"><i class="fas fa-exclamation-triangle mr-2"></i>${renderMarkdown(part.content)}</div>`;
+                        
+                        case 'text':
+                        default:
+                            return `<div class="md-content">${renderMarkdown(part.content)}</div>`;
+                    }
+                }).join('');
+            }
+            
+            // Fallback: render raw content as markdown + legacy images
+            let html = `<div class="md-content">${renderMarkdown(msg.content || '')}</div>`;
+            
+            // Legacy: show images from images array
+            if (msg.images && msg.images.length > 0) {
+                html += msg.images.map(img => {
+                    const filename = img.includes('/') ? img.split('/').pop() : img;
+                    const imgUrl = `/api/agent/outputs/${currentAgentSessionId}/${filename}`;
+                    return `<div class="agent-image-output">
+                        <img src="${imgUrl}" onclick="window.open(this.src,'_blank')" alt="${filename}" loading="lazy">
+                        <div class="agent-image-caption"><i class="fas fa-image mr-1"></i>${filename}</div>
+                    </div>`;
+                }).join('');
+            }
+            
+            // Legacy: show code if present
+            if (msg.code) {
+                let highlightedCode = msg.code;
+                if (typeof hljs !== 'undefined') {
+                    try { highlightedCode = hljs.highlight(msg.code, {language: 'python'}).value; } catch(e) {}
+                }
+                html += `<div class="agent-code-block">
+                    <div class="agent-code-header"><span><i class="fas fa-code mr-1"></i> Código ejecutado</span><span class="lang-badge">python</span></div>
+                    <pre style="margin:0;background:#1e1e2e;padding:0"><code class="hljs" style="padding:0.75rem;display:block;overflow-x:auto">${highlightedCode}</code></pre>
+                    ${msg.code_output ? `<div class="agent-code-output ${msg.code_success !== false ? 'success' : 'error'}">${msg.code_output.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>` : ''}
+                </div>`;
+            }
+            
+            return html;
+        }
+
         function renderAgentMessages(messages) {
             const container = document.getElementById('agent-chat-messages');
             container.innerHTML = messages.map(msg => {
-                const isUser = msg.role === 'user';
-                const bgColor = isUser ? '#e3f2fd' : '#f5f5f5';
-                const align = isUser ? 'flex-end' : 'flex-start';
-                const icon = isUser ? 'fa-user' : 'fa-robot';
-                let contentHtml = `<div style="white-space:pre-wrap;font-size:0.9rem">${msg.content || ''}</div>`;
-                
-                // Mostrar imágenes generadas por el agente
-                if (msg.images && msg.images.length > 0) {
-                    contentHtml += msg.images.map(img => `
-                        <div class="mt-2">
-                            <img src="/api/agent/outputs/${currentAgentSessionId}/${img}" 
-                                style="max-width:100%;max-height:400px;border-radius:8px;cursor:pointer;border:2px solid #ddd" 
-                                onclick="window.open(this.src, '_blank')">
-                            <p class="is-size-7 has-text-grey mt-1">${img}</p>
-                        </div>
-                    `).join('');
-                }
-                
-                // Mostrar código ejecutado
-                if (msg.code_executed) {
-                    contentHtml += `
-                        <details class="mt-2">
-                            <summary class="is-size-7 has-text-info" style="cursor:pointer">
-                                <i class="fas fa-code mr-1"></i>Código ejecutado
-                            </summary>
-                            <pre style="background:#1a1a2e;color:#00ff88;padding:0.75rem;border-radius:6px;font-size:0.75rem;overflow-x:auto;margin-top:0.5rem">${msg.code_executed}</pre>
-                        </details>`;
-                }
-                
-                return `
-                    <div style="display:flex;justify-content:${align};margin-bottom:1rem">
-                        <div style="max-width:80%;background:${bgColor};padding:1rem;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
-                            <div style="display:flex;align-items:center;margin-bottom:0.5rem">
-                                <span class="icon is-small mr-2"><i class="fas ${icon}"></i></span>
-                                <span class="is-size-7 has-text-grey">${msg.timestamp || ''}</span>
-                            </div>
-                            ${contentHtml}
-                        </div>
+                if (msg.role === 'system') {
+                    return `<div class="agent-msg agent-msg-system">
+                        <i class="fas fa-info-circle mr-1"></i>${msg.content || ''}
                     </div>`;
+                }
+                
+                const isUser = msg.role === 'user';
+                const msgClass = isUser ? 'agent-msg-user' : 'agent-msg-assistant';
+                const icon = isUser ? 'fa-user' : 'fa-robot';
+                const label = isUser ? 'Tú' : 'Agente';
+                
+                const contentHtml = isUser 
+                    ? `<div class="md-content">${renderMarkdown(msg.content || '')}</div>`
+                    : renderAgentMessageParts(msg);
+                
+                return `<div class="agent-msg ${msgClass}">
+                    <div class="agent-msg-meta">
+                        <i class="fas ${icon}"></i>
+                        <strong>${label}</strong>
+                        <span>${msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}</span>
+                    </div>
+                    ${contentHtml}
+                </div>`;
             }).join('');
+            
             container.scrollTop = container.scrollHeight;
+            
+            // Apply syntax highlighting to any remaining code blocks
+            if (typeof hljs !== 'undefined') {
+                container.querySelectorAll('pre code:not(.hljs)').forEach(block => {
+                    hljs.highlightElement(block);
+                });
+            }
         }
 
         document.getElementById('btn-send-agent-message').addEventListener('click', sendAgentMessage);
@@ -3312,23 +3449,28 @@ HTML_TEMPLATE = """
             
             // Agregar mensaje del usuario al chat inmediatamente
             const container = document.getElementById('agent-chat-messages');
-            container.innerHTML += `
-                <div style="display:flex;justify-content:flex-end;margin-bottom:1rem">
-                    <div style="max-width:80%;background:#e3f2fd;padding:1rem;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
-                        <div style="display:flex;align-items:center;margin-bottom:0.5rem">
-                            <span class="icon is-small mr-2"><i class="fas fa-user"></i></span>
-                            <span class="is-size-7 has-text-grey">${new Date().toLocaleTimeString()}</span>
-                        </div>
-                        <div style="white-space:pre-wrap;font-size:0.9rem">${message}</div>
-                    </div>
-                </div>`;
+            const userMsgHtml = `<div class="agent-msg agent-msg-user">
+                <div class="agent-msg-meta">
+                    <i class="fas fa-user"></i>
+                    <strong>Tú</strong>
+                    <span>${new Date().toLocaleTimeString()}</span>
+                </div>
+                <div class="md-content">${renderMarkdown(message)}</div>
+            </div>`;
+            container.innerHTML += userMsgHtml;
             
-            // Mostrar indicador de carga
+            // Mostrar indicador de carga con animación
             container.innerHTML += `
-                <div id="agent-typing" style="display:flex;justify-content:flex-start;margin-bottom:1rem">
-                    <div style="background:#f5f5f5;padding:1rem;border-radius:12px">
-                        <i class="fas fa-spinner fa-spin mr-2"></i>El agente está procesando...
+                <div id="agent-typing" class="agent-msg agent-msg-assistant" style="max-width:300px">
+                    <div class="agent-msg-meta">
+                        <i class="fas fa-robot"></i>
+                        <strong>Agente</strong>
                     </div>
+                    <div style="display:flex;align-items:center;gap:0.5rem">
+                        <div class="loader" style="width:20px;height:20px;border:2px solid #ddd;border-top-color:#667eea;border-radius:50%;animation:spin 0.8s linear infinite"></div>
+                        <span style="color:#888;font-size:0.9rem">Analizando y ejecutando código...</span>
+                    </div>
+                    <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
                 </div>`;
             container.scrollTop = container.scrollHeight;
             
@@ -3342,16 +3484,15 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({message})
                 });
                 const data = await res.json();
-                // Recargar toda la sesión para mostrar la respuesta
+                // Recargar toda la sesión para mostrar la respuesta con formato completo
                 openAgentSession(currentAgentSessionId);
             } catch(e) {
                 const typing = document.getElementById('agent-typing');
                 if (typing) typing.remove();
                 container.innerHTML += `
-                    <div style="display:flex;justify-content:flex-start;margin-bottom:1rem">
-                        <div style="background:#fff5f5;padding:1rem;border-radius:12px;border:1px solid #f14668">
-                            <i class="fas fa-exclamation-triangle mr-2 has-text-danger"></i>Error: ${e.message}
-                        </div>
+                    <div class="agent-msg agent-msg-error">
+                        <i class="fas fa-exclamation-triangle mr-2 has-text-danger"></i>
+                        <strong>Error:</strong> ${e.message}
                     </div>`;
             } finally {
                 btn.disabled = false;
@@ -3396,7 +3537,7 @@ HTML_TEMPLATE = """
                     <div class="box is-clickable p-2 mb-1" onclick="document.getElementById('agent-image-select').value='${r.image_name}'">
                         <div class="level is-mobile">
                             <div class="level-left">
-                                <img src="/api/images/${r.image_name}/file" style="width:40px;height:40px;object-fit:cover;border-radius:4px" class="mr-2">
+                                <img src="/api/images/view/${r.image_name}" style="width:40px;height:40px;object-fit:cover;border-radius:4px" class="mr-2">
                                 <div>
                                     <p class="is-size-7 has-text-weight-bold">${r.image_name}</p>
                                     <p class="is-size-7 has-text-grey">${(r.score * 100).toFixed(1)}%</p>
