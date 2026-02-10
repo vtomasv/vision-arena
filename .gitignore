@@ -42,3 +42,4 @@ ENV/
 
 # Logs
 *.log
+data/

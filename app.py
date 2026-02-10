@@ -21,10 +21,39 @@ from llm_providers import LLMConfig
 from pipeline import Pipeline, PipelineRunner, PipelineComparator, PipelineReviewer
 from storage import StorageManager
 from pdf_generator import generate_forensic_report
+from semantic_search import SemanticSearchEngine
+from visual_agent import VisualAgent, ensure_image_packages
 
 # Inicializar aplicación
-app = FastAPI(title="Vision LLM Comparator", version="2.0.0")
+app = FastAPI(title="Vision LLM Comparator", version="3.0.0")
 storage = StorageManager()
+
+# Motor de búsqueda semántica
+data_dir = os.environ.get("DATA_DIR", "./data")
+search_engine = SemanticSearchEngine(os.path.join(data_dir, "search_index"))
+
+# Agente visual
+visual_agent = VisualAgent(
+    sessions_dir=os.path.join(data_dir, "agent_sessions"),
+    config_loader=None  # Se configura después de inicializar storage
+)
+
+@app.on_event("startup")
+async def startup_event():
+    """Inicializar componentes al arrancar"""
+    # Configurar config_loader del agente
+    def agent_config_loader(name):
+        config = storage.get_llm_config(name)
+        if config:
+            return LLMConfig(**config) if isinstance(config, dict) else config
+        return None
+    visual_agent.config_loader = agent_config_loader
+    
+    # Instalar paquetes de imagen si es necesario
+    try:
+        ensure_image_packages()
+    except Exception:
+        pass
 
 # ==================== Modelos Pydantic ====================
 
@@ -43,6 +72,7 @@ class PipelineStepCreate(BaseModel):
     prompt: str
     use_previous_output: bool = True
     llm_config_name: Optional[str] = None
+    index_for_search: bool = False
 
 class PipelineCreate(BaseModel):
     name: str
@@ -146,7 +176,8 @@ async def create_pipeline(pipeline_data: PipelineCreate):
             name=step.name,
             prompt=step.prompt,
             use_previous_output=step.use_previous_output,
-            llm_config_name=step.llm_config_name
+            llm_config_name=step.llm_config_name,
+            index_for_search=step.index_for_search
         )
     
     storage.save_pipeline(pipeline)
@@ -185,7 +216,8 @@ async def update_pipeline(pipeline_id: str, pipeline_data: PipelineCreate):
             name=step.name,
             prompt=step.prompt,
             use_previous_output=step.use_previous_output,
-            llm_config_name=step.llm_config_name
+            llm_config_name=step.llm_config_name,
+            index_for_search=step.index_for_search
         )
     
     storage.save_pipeline(pipeline)
@@ -367,6 +399,37 @@ async def run_execution(execution_id: str, pipeline_ids: List[str],
         # Guardar resultados
         for result in results:
             storage.save_execution(result)
+        
+        # Indexar semánticamente si algún paso tiene index_for_search
+        try:
+            for result in results:
+                result_dict = result.to_dict()
+                pipeline = None
+                for p in pipelines:
+                    if p.name == result_dict.get("pipeline_name"):
+                        pipeline = p
+                        break
+                if pipeline:
+                    index_texts = []
+                    for step_result in result_dict.get("step_results", []):
+                        step_id = step_result.get("step_id", "")
+                        for step in pipeline.steps:
+                            if step.id == step_id and step.index_for_search:
+                                content = step_result.get("content", "")
+                                if content:
+                                    index_texts.append(content)
+                    if index_texts:
+                        combined_text = "\n".join(index_texts)
+                        metadata = {
+                            "image_name": image_name,
+                            "image_path": image_path,
+                            "pipeline_name": result_dict.get("pipeline_name", ""),
+                            "execution_id": result_dict.get("id", ""),
+                            "context_data": final_context or {}
+                        }
+                        search_engine.index_image(image_name, image_path, combined_text, metadata)
+        except Exception as e:
+            print(f"Warning: Semantic indexing failed: {e}")
         
         # Generar reporte
         report = PipelineComparator.generate_comparison_report(results)
@@ -624,6 +687,149 @@ async def list_batch_history(limit: int = 50):
     return storage.list_batch_executions(limit)
 
 
+# --- Semantic Search ---
+
+class SearchRequest(BaseModel):
+    query: str
+    top_k: int = 20
+    filters: Optional[Dict[str, Any]] = None
+
+@app.post("/api/search")
+async def semantic_search(request: SearchRequest):
+    """Buscar imágenes por descripción semántica"""
+    results = search_engine.search(request.query, request.top_k, request.filters)
+    return {"results": results, "query": request.query, "total": len(results)}
+
+@app.get("/api/search/stats")
+async def search_stats():
+    """Obtener estadísticas del índice semántico"""
+    return search_engine.get_stats()
+
+@app.post("/api/search/reindex")
+async def reindex_all():
+    """Reindexar todas las ejecuciones existentes"""
+    count = 0
+    executions = storage.list_executions(limit=1000)
+    for exec_summary in executions:
+        exec_id = exec_summary.get("id", "")
+        exec_data = storage.get_execution_details(exec_id)
+        if not exec_data:
+            continue
+        image_name = exec_data.get("image_name", "")
+        image_path = str(storage.images_dir / image_name)
+        pipeline_name = exec_data.get("pipeline_name", "")
+        
+        # Buscar pipeline para verificar index_for_search
+        index_texts = []
+        for step_result in exec_data.get("step_results", []):
+            content = step_result.get("content", "")
+            if content:
+                index_texts.append(content)
+        
+        if index_texts:
+            combined_text = "\n".join(index_texts)
+            metadata = {
+                "image_name": image_name,
+                "image_path": image_path,
+                "pipeline_name": pipeline_name,
+                "execution_id": exec_id,
+                "context_data": exec_data.get("context_data", {})
+            }
+            search_engine.index_image(image_name, image_path, combined_text, metadata)
+            count += 1
+    
+    return {"status": "ok", "indexed": count}
+
+@app.get("/api/search/image-details/{image_name}")
+async def get_image_search_details(image_name: str):
+    """Obtener todos los datos indexados de una imagen"""
+    details = search_engine.get_image_details(image_name)
+    if not details:
+        raise HTTPException(status_code=404, detail="Image not found in index")
+    return details
+
+# --- Visual Agent ---
+
+class AgentSessionCreate(BaseModel):
+    image_name: str
+    llm_config_name: str
+    title: str = ""
+
+class AgentMessageRequest(BaseModel):
+    message: str
+    search_image_path: Optional[str] = None
+
+@app.post("/api/agent/sessions")
+async def create_agent_session(request: AgentSessionCreate):
+    """Crear una nueva sesión de agente"""
+    image_info = storage.get_image_with_context(request.image_name)
+    if not image_info:
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    session = visual_agent.create_session(
+        image_path=image_info["image_path"],
+        image_name=request.image_name,
+        llm_config_name=request.llm_config_name,
+        title=request.title
+    )
+    return {"status": "ok", "session": session.to_dict()}
+
+@app.get("/api/agent/sessions")
+async def list_agent_sessions():
+    """Listar todas las sesiones de agente"""
+    return visual_agent.list_sessions()
+
+@app.get("/api/agent/sessions/{session_id}")
+async def get_agent_session(session_id: str):
+    """Obtener una sesión de agente"""
+    session = visual_agent.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session.to_dict()
+
+@app.post("/api/agent/sessions/{session_id}/messages")
+async def send_agent_message(session_id: str, request: AgentMessageRequest):
+    """Enviar un mensaje al agente"""
+    try:
+        response = await visual_agent.send_message(
+            session_id, 
+            request.message,
+            request.search_image_path
+        )
+        return {"status": "ok", "message": response.to_dict()}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/agent/sessions/{session_id}")
+async def delete_agent_session(session_id: str):
+    """Eliminar una sesión de agente"""
+    if visual_agent.delete_session(session_id):
+        return {"status": "ok"}
+    raise HTTPException(status_code=404, detail="Session not found")
+
+@app.get("/api/agent/sessions/{session_id}/pdf")
+async def generate_agent_report(session_id: str):
+    """Generar reporte PDF de una sesión de agente"""
+    report_path = visual_agent.generate_session_report(session_id)
+    if not report_path:
+        raise HTTPException(status_code=500, detail="Error generating report")
+    return FileResponse(
+        report_path,
+        media_type="application/pdf",
+        filename=f"agent_report_{session_id[:8]}.pdf"
+    )
+
+@app.get("/api/agent/outputs/{session_id}/{filename}")
+async def get_agent_output(session_id: str, filename: str):
+    """Obtener un archivo de salida del agente"""
+    output_path = Path(data_dir) / "agent_sessions" / session_id / "outputs" / filename
+    if not output_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(str(output_path))
+
+
 # ==================== Interfaz Web ====================
 
 HTML_TEMPLATE = """
@@ -828,6 +1034,12 @@ HTML_TEMPLATE = """
                     </li>
                     <li data-tab="statistics">
                         <a><i class="fas fa-chart-bar mr-2"></i>Estadísticas</a>
+                    </li>
+                    <li data-tab="search">
+                        <a><i class="fas fa-search mr-2"></i>Búsqueda</a>
+                    </li>
+                    <li data-tab="agent">
+                        <a><i class="fas fa-robot mr-2"></i>Agente Visual</a>
                     </li>
                 </ul>
             </div>
@@ -1337,6 +1549,166 @@ HTML_TEMPLATE = """
                 </div>
             </div>
         </div>
+
+        <!-- Tab: Búsqueda Semántica -->
+        <div id="tab-search" class="tab-content">
+            <div class="columns">
+                <div class="column is-8">
+                    <div class="card">
+                        <header class="card-header">
+                            <p class="card-header-title">
+                                <i class="fas fa-search mr-2"></i>Búsqueda Semántica de Imágenes
+                            </p>
+                        </header>
+                        <div class="card-content">
+                            <div class="field has-addons">
+                                <div class="control is-expanded">
+                                    <input class="input" type="text" id="search-query" 
+                                        placeholder="Ej: vehículo rojo con parachoque dañado, conductor con ropa verde...">
+                                </div>
+                                <div class="control">
+                                    <button class="button is-primary" id="btn-search">
+                                        <i class="fas fa-search mr-1"></i>Buscar
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="field">
+                                <label class="label is-small">Resultados máximos</label>
+                                <div class="control">
+                                    <input class="input is-small" type="number" id="search-top-k" value="20" min="1" max="100" style="width:100px">
+                                </div>
+                            </div>
+                            <div id="search-results" class="mt-4"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="column is-4">
+                    <div class="card">
+                        <header class="card-header">
+                            <p class="card-header-title">
+                                <i class="fas fa-database mr-2"></i>Índice Semántico
+                            </p>
+                        </header>
+                        <div class="card-content" id="search-stats-content">
+                            <p class="has-text-grey">Cargando estadísticas...</p>
+                        </div>
+                        <footer class="card-footer">
+                            <a class="card-footer-item" id="btn-reindex">
+                                <i class="fas fa-sync mr-1"></i>Reindexar Todo
+                            </a>
+                        </footer>
+                    </div>
+                </div>
+            </div>
+            <!-- Modal de detalle de imagen -->
+            <div class="modal" id="image-detail-modal">
+                <div class="modal-background"></div>
+                <div class="modal-card" style="width:90%;max-width:1200px;max-height:90vh">
+                    <header class="modal-card-head">
+                        <p class="modal-card-title" id="modal-image-title">Detalle de Imagen</p>
+                        <button class="delete" aria-label="close" id="btn-close-image-modal"></button>
+                    </header>
+                    <section class="modal-card-body" id="modal-image-body">
+                    </section>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab: Agente Visual -->
+        <div id="tab-agent" class="tab-content">
+            <div class="columns">
+                <div class="column is-4">
+                    <div class="card">
+                        <header class="card-header">
+                            <p class="card-header-title">
+                                <i class="fas fa-plus mr-2"></i>Nueva Sesión
+                            </p>
+                        </header>
+                        <div class="card-content">
+                            <div class="field">
+                                <label class="label">Título (opcional)</label>
+                                <input class="input" type="text" id="agent-session-title" placeholder="Análisis de vehículo...">
+                            </div>
+                            <div class="field">
+                                <label class="label">Imagen</label>
+                                <div class="select is-fullwidth">
+                                    <select id="agent-image-select">
+                                        <option value="">Seleccionar imagen...</option>
+                                    </select>
+                                </div>
+                                <p class="help">O busca una imagen en la base de datos semántica</p>
+                                <div class="field has-addons mt-2">
+                                    <div class="control is-expanded">
+                                        <input class="input is-small" type="text" id="agent-search-image" placeholder="Buscar imagen...">
+                                    </div>
+                                    <div class="control">
+                                        <button class="button is-small is-info" id="btn-agent-search-image">
+                                            <i class="fas fa-search"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div id="agent-search-results" class="mt-2" style="max-height:200px;overflow-y:auto"></div>
+                            </div>
+                            <div class="field">
+                                <label class="label">Modelo LLM</label>
+                                <div class="select is-fullwidth">
+                                    <select id="agent-llm-select">
+                                        <option value="">Seleccionar modelo...</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <button class="button is-primary is-fullwidth" id="btn-create-agent-session">
+                                <i class="fas fa-robot mr-2"></i>Iniciar Sesión
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card mt-4">
+                        <header class="card-header">
+                            <p class="card-header-title">
+                                <i class="fas fa-list mr-2"></i>Sesiones
+                            </p>
+                        </header>
+                        <div class="card-content" id="agent-sessions-list" style="max-height:400px;overflow-y:auto">
+                            <p class="has-text-grey">Sin sesiones</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="column is-8">
+                    <div class="card" id="agent-chat-card" style="display:none">
+                        <header class="card-header">
+                            <p class="card-header-title" id="agent-chat-title">
+                                <i class="fas fa-comments mr-2"></i>Chat con Agente Visual
+                            </p>
+                            <div class="card-header-icon">
+                                <button class="button is-small is-warning" id="btn-agent-pdf" title="Generar PDF">
+                                    <i class="fas fa-file-pdf"></i>
+                                </button>
+                            </div>
+                        </header>
+                        <div class="card-content" id="agent-chat-messages" style="height:500px;overflow-y:auto;background:#f9f9f9;border-radius:8px">
+                        </div>
+                        <footer class="card-footer" style="padding:1rem">
+                            <div class="field has-addons" style="width:100%">
+                                <div class="control is-expanded">
+                                    <input class="input" type="text" id="agent-message-input" 
+                                        placeholder="Escribe tu mensaje... (ej: recorta el vehículo de la imagen, ampliar la patente)">
+                                </div>
+                                <div class="control">
+                                    <button class="button is-primary" id="btn-send-agent-message">
+                                        <i class="fas fa-paper-plane"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </footer>
+                    </div>
+                    <div id="agent-placeholder" class="has-text-centered" style="padding:4rem">
+                        <i class="fas fa-robot" style="font-size:4rem;color:#ccc"></i>
+                        <p class="mt-4 has-text-grey">Selecciona o crea una sesión para comenzar a interactuar con el Agente Visual</p>
+                        <p class="has-text-grey is-size-7 mt-2">El agente puede analizar, recortar, ampliar y procesar imágenes ejecutando código Python</p>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -1366,6 +1738,8 @@ HTML_TEMPLATE = """
                 if (tabId === 'history') loadHistory();
                 if (tabId === 'reviews') { loadPendingReviews(); loadAccuracyMetrics(); }
                 if (tabId === 'statistics') loadStatistics();
+                if (tabId === 'search') loadSearchStats();
+                if (tabId === 'agent') { loadAgentSessions(); loadAgentImages(); loadAgentLLMs(); }
             });
         });
 
@@ -1617,11 +1991,21 @@ HTML_TEMPLATE = """
                             </select>
                         </div>
                     </div>
-                    <label class="checkbox">
-                        <input type="checkbox" ${step.use_previous_output ? 'checked' : ''} 
-                            onchange="updateStep(${i}, 'use_previous_output', this.checked)">
-                        Usar salida del paso anterior como contexto
-                    </label>
+                    <div class="field">
+                        <label class="checkbox">
+                            <input type="checkbox" ${step.use_previous_output ? 'checked' : ''} 
+                                onchange="updateStep(${i}, 'use_previous_output', this.checked)">
+                            Usar salida del paso anterior como contexto
+                        </label>
+                    </div>
+                    <div class="field">
+                        <label class="checkbox">
+                            <input type="checkbox" ${step.index_for_search ? 'checked' : ''} 
+                                onchange="updateStep(${i}, 'index_for_search', this.checked)">
+                            <i class="fas fa-search mr-1"></i> Indexar para búsqueda semántica
+                        </label>
+                        <p class="help">La salida de este paso se usará para indexar la imagen en la búsqueda semántica</p>
+                    </div>
                 </div>
             `).join('');
         }
@@ -1634,7 +2018,7 @@ HTML_TEMPLATE = """
         }
 
         document.getElementById('btn-add-step').addEventListener('click', () => {
-            pipelineSteps.push({name: '', prompt: '', use_previous_output: true, llm_config_name: null});
+            pipelineSteps.push({name: '', prompt: '', use_previous_output: true, llm_config_name: null, index_for_search: false});
             renderPipelineSteps();
         });
 
@@ -2569,6 +2953,411 @@ HTML_TEMPLATE = """
             // Update counter
             document.getElementById('total-executions').textContent = stats.total_executions;
         }
+
+        // ==================== Semantic Search ====================
+        
+        async function loadSearchStats() {
+            try {
+                const res = await fetch('/api/search/stats');
+                const stats = await res.json();
+                document.getElementById('search-stats-content').innerHTML = `
+                    <div class="content">
+                        <p><strong>Imágenes indexadas:</strong> ${stats.total_images || 0}</p>
+                        <p><strong>Documentos totales:</strong> ${stats.total_documents || 0}</p>
+                        <p><strong>Dimensión vectorial:</strong> ${stats.vector_dimension || 'N/A'}</p>
+                        <p><strong>Última actualización:</strong> ${stats.last_updated || 'Nunca'}</p>
+                    </div>
+                `;
+            } catch(e) {
+                document.getElementById('search-stats-content').innerHTML = '<p class="has-text-danger">Error al cargar estadísticas</p>';
+            }
+        }
+
+        document.getElementById('btn-search').addEventListener('click', async () => {
+            const query = document.getElementById('search-query').value.trim();
+            if (!query) return;
+            const topK = parseInt(document.getElementById('search-top-k').value) || 20;
+            const btn = document.getElementById('btn-search');
+            btn.classList.add('is-loading');
+            try {
+                const res = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({query, top_k: topK})
+                });
+                const data = await res.json();
+                renderSearchResults(data.results, query);
+            } catch(e) {
+                document.getElementById('search-results').innerHTML = '<p class="has-text-danger">Error en la búsqueda</p>';
+            } finally {
+                btn.classList.remove('is-loading');
+            }
+        });
+
+        document.getElementById('search-query').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') document.getElementById('btn-search').click();
+        });
+
+        function renderSearchResults(results, query) {
+            if (!results || results.length === 0) {
+                document.getElementById('search-results').innerHTML = `
+                    <div class="notification is-warning is-light">
+                        <i class="fas fa-info-circle mr-2"></i>No se encontraron resultados para: <strong>${query}</strong>
+                    </div>`;
+                return;
+            }
+            const html = `
+                <p class="mb-3"><strong>${results.length}</strong> resultados para: <em>${query}</em></p>
+                <div class="columns is-multiline">
+                    ${results.map((r, i) => `
+                        <div class="column is-4">
+                            <div class="card is-clickable" onclick="showImageDetail('${r.image_name}')" style="height:100%">
+                                <div class="card-image">
+                                    <figure class="image is-4by3">
+                                        <img src="/api/images/${r.image_name}/file" alt="${r.image_name}" 
+                                            style="object-fit:cover;width:100%;height:100%">
+                                    </figure>
+                                </div>
+                                <div class="card-content" style="padding:0.75rem">
+                                    <p class="is-size-7 has-text-weight-bold">${r.image_name}</p>
+                                    <div class="level is-mobile mt-1">
+                                        <div class="level-left">
+                                            <span class="tag is-primary is-light">
+                                                <i class="fas fa-percentage mr-1"></i>${(r.score * 100).toFixed(1)}%
+                                            </span>
+                                        </div>
+                                        <div class="level-right">
+                                            <span class="tag is-info is-light is-size-7">${r.pipeline_name || ''}</span>
+                                        </div>
+                                    </div>
+                                    <p class="is-size-7 has-text-grey mt-1" style="max-height:60px;overflow:hidden">
+                                        ${(r.description || '').substring(0, 150)}...
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>`;
+            document.getElementById('search-results').innerHTML = html;
+        }
+
+        async function showImageDetail(imageName) {
+            const modal = document.getElementById('image-detail-modal');
+            modal.classList.add('is-active');
+            document.getElementById('modal-image-title').textContent = imageName;
+            document.getElementById('modal-image-body').innerHTML = '<p>Cargando...</p>';
+            try {
+                const res = await fetch(`/api/search/image-details/${imageName}`);
+                const details = await res.json();
+                let contextHtml = '';
+                if (details.metadata && details.metadata.context_data) {
+                    const ctx = details.metadata.context_data;
+                    contextHtml = `
+                        <div class="box">
+                            <h5 class="title is-6"><i class="fas fa-database mr-1"></i>Datos de Contexto</h5>
+                            <table class="table is-fullwidth is-striped is-size-7">
+                                <tbody>
+                                    ${Object.entries(ctx).map(([k,v]) => 
+                                        `<tr><td><strong>${k}</strong></td><td>${typeof v === 'object' ? JSON.stringify(v) : v}</td></tr>`
+                                    ).join('')}
+                                </tbody>
+                            </table>
+                        </div>`;
+                }
+                document.getElementById('modal-image-body').innerHTML = `
+                    <div class="columns">
+                        <div class="column is-5">
+                            <figure class="image">
+                                <img src="/api/images/${imageName}/file" alt="${imageName}" style="border-radius:8px;max-height:500px;object-fit:contain">
+                            </figure>
+                        </div>
+                        <div class="column is-7">
+                            ${contextHtml}
+                            <div class="box">
+                                <h5 class="title is-6"><i class="fas fa-file-alt mr-1"></i>Descripción Indexada</h5>
+                                <div class="content is-size-7" style="max-height:400px;overflow-y:auto;white-space:pre-wrap">${details.description || 'Sin descripción'}</div>
+                            </div>
+                        </div>
+                    </div>`;
+            } catch(e) {
+                document.getElementById('modal-image-body').innerHTML = `<p class="has-text-danger">Error al cargar detalles: ${e.message}</p>`;
+            }
+        }
+
+        document.getElementById('btn-close-image-modal').addEventListener('click', () => {
+            document.getElementById('image-detail-modal').classList.remove('is-active');
+        });
+        document.querySelector('#image-detail-modal .modal-background').addEventListener('click', () => {
+            document.getElementById('image-detail-modal').classList.remove('is-active');
+        });
+
+        document.getElementById('btn-reindex').addEventListener('click', async () => {
+            const btn = document.getElementById('btn-reindex');
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Reindexando...';
+            try {
+                const res = await fetch('/api/search/reindex', {method: 'POST'});
+                const data = await res.json();
+                btn.innerHTML = `<i class="fas fa-check mr-1"></i>${data.indexed} indexadas`;
+                loadSearchStats();
+                setTimeout(() => { btn.innerHTML = '<i class="fas fa-sync mr-1"></i>Reindexar Todo'; }, 3000);
+            } catch(e) {
+                btn.innerHTML = '<i class="fas fa-times mr-1"></i>Error';
+                setTimeout(() => { btn.innerHTML = '<i class="fas fa-sync mr-1"></i>Reindexar Todo'; }, 3000);
+            }
+        });
+
+        // ==================== Visual Agent ====================
+        
+        let currentAgentSessionId = null;
+
+        async function loadAgentSessions() {
+            try {
+                const res = await fetch('/api/agent/sessions');
+                const sessions = await res.json();
+                const container = document.getElementById('agent-sessions-list');
+                if (!sessions || sessions.length === 0) {
+                    container.innerHTML = '<p class="has-text-grey">Sin sesiones</p>';
+                    return;
+                }
+                container.innerHTML = sessions.map(s => `
+                    <div class="box is-clickable p-3 mb-2 ${currentAgentSessionId === s.id ? 'has-background-primary-light' : ''}" 
+                         onclick="openAgentSession('${s.id}')">
+                        <div class="level is-mobile">
+                            <div class="level-left">
+                                <div>
+                                    <p class="is-size-7 has-text-weight-bold">${s.title || s.image_name}</p>
+                                    <p class="is-size-7 has-text-grey">${s.llm_config_name} | ${s.message_count || 0} msgs</p>
+                                </div>
+                            </div>
+                            <div class="level-right">
+                                <button class="delete is-small" onclick="event.stopPropagation(); deleteAgentSession('${s.id}')"></button>
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+            } catch(e) {
+                console.error('Error loading agent sessions:', e);
+            }
+        }
+
+        async function loadAgentImages() {
+            try {
+                const res = await fetch('/api/images');
+                const images = await res.json();
+                const select = document.getElementById('agent-image-select');
+                select.innerHTML = '<option value="">Seleccionar imagen...</option>' +
+                    images.map(img => `<option value="${img.name}">${img.name}</option>`).join('');
+            } catch(e) {}
+        }
+
+        async function loadAgentLLMs() {
+            try {
+                const res = await fetch('/api/configs');
+                const configs = await res.json();
+                const select = document.getElementById('agent-llm-select');
+                select.innerHTML = '<option value="">Seleccionar modelo...</option>' +
+                    configs.map(c => `<option value="${c.name}">${c.name} (${c.provider}/${c.model})</option>`).join('');
+            } catch(e) {}
+        }
+
+        document.getElementById('btn-create-agent-session').addEventListener('click', async () => {
+            const imageName = document.getElementById('agent-image-select').value;
+            const llmName = document.getElementById('agent-llm-select').value;
+            const title = document.getElementById('agent-session-title').value;
+            if (!imageName || !llmName) {
+                alert('Selecciona una imagen y un modelo LLM');
+                return;
+            }
+            const btn = document.getElementById('btn-create-agent-session');
+            btn.classList.add('is-loading');
+            try {
+                const res = await fetch('/api/agent/sessions', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({image_name: imageName, llm_config_name: llmName, title})
+                });
+                const data = await res.json();
+                currentAgentSessionId = data.session.id;
+                loadAgentSessions();
+                openAgentSession(data.session.id);
+            } catch(e) {
+                alert('Error al crear sesión: ' + e.message);
+            } finally {
+                btn.classList.remove('is-loading');
+            }
+        });
+
+        async function openAgentSession(sessionId) {
+            currentAgentSessionId = sessionId;
+            document.getElementById('agent-chat-card').style.display = 'block';
+            document.getElementById('agent-placeholder').style.display = 'none';
+            loadAgentSessions();
+            try {
+                const res = await fetch(`/api/agent/sessions/${sessionId}`);
+                const session = await res.json();
+                document.getElementById('agent-chat-title').innerHTML = 
+                    `<i class="fas fa-comments mr-2"></i>${session.title || session.image_name} <span class="tag is-info ml-2">${session.llm_config_name}</span>`;
+                renderAgentMessages(session.messages || []);
+            } catch(e) {
+                console.error('Error opening session:', e);
+            }
+        }
+
+        function renderAgentMessages(messages) {
+            const container = document.getElementById('agent-chat-messages');
+            container.innerHTML = messages.map(msg => {
+                const isUser = msg.role === 'user';
+                const bgColor = isUser ? '#e3f2fd' : '#f5f5f5';
+                const align = isUser ? 'flex-end' : 'flex-start';
+                const icon = isUser ? 'fa-user' : 'fa-robot';
+                let contentHtml = `<div style="white-space:pre-wrap;font-size:0.9rem">${msg.content || ''}</div>`;
+                
+                // Mostrar imágenes generadas por el agente
+                if (msg.images && msg.images.length > 0) {
+                    contentHtml += msg.images.map(img => `
+                        <div class="mt-2">
+                            <img src="/api/agent/outputs/${currentAgentSessionId}/${img}" 
+                                style="max-width:100%;max-height:400px;border-radius:8px;cursor:pointer;border:2px solid #ddd" 
+                                onclick="window.open(this.src, '_blank')">
+                            <p class="is-size-7 has-text-grey mt-1">${img}</p>
+                        </div>
+                    `).join('');
+                }
+                
+                // Mostrar código ejecutado
+                if (msg.code_executed) {
+                    contentHtml += `
+                        <details class="mt-2">
+                            <summary class="is-size-7 has-text-info" style="cursor:pointer">
+                                <i class="fas fa-code mr-1"></i>Código ejecutado
+                            </summary>
+                            <pre style="background:#1a1a2e;color:#00ff88;padding:0.75rem;border-radius:6px;font-size:0.75rem;overflow-x:auto;margin-top:0.5rem">${msg.code_executed}</pre>
+                        </details>`;
+                }
+                
+                return `
+                    <div style="display:flex;justify-content:${align};margin-bottom:1rem">
+                        <div style="max-width:80%;background:${bgColor};padding:1rem;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+                            <div style="display:flex;align-items:center;margin-bottom:0.5rem">
+                                <span class="icon is-small mr-2"><i class="fas ${icon}"></i></span>
+                                <span class="is-size-7 has-text-grey">${msg.timestamp || ''}</span>
+                            </div>
+                            ${contentHtml}
+                        </div>
+                    </div>`;
+            }).join('');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        document.getElementById('btn-send-agent-message').addEventListener('click', sendAgentMessage);
+        document.getElementById('agent-message-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendAgentMessage();
+        });
+
+        async function sendAgentMessage() {
+            if (!currentAgentSessionId) return;
+            const input = document.getElementById('agent-message-input');
+            const message = input.value.trim();
+            if (!message) return;
+            input.value = '';
+            
+            // Agregar mensaje del usuario al chat inmediatamente
+            const container = document.getElementById('agent-chat-messages');
+            container.innerHTML += `
+                <div style="display:flex;justify-content:flex-end;margin-bottom:1rem">
+                    <div style="max-width:80%;background:#e3f2fd;padding:1rem;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+                        <div style="display:flex;align-items:center;margin-bottom:0.5rem">
+                            <span class="icon is-small mr-2"><i class="fas fa-user"></i></span>
+                            <span class="is-size-7 has-text-grey">${new Date().toLocaleTimeString()}</span>
+                        </div>
+                        <div style="white-space:pre-wrap;font-size:0.9rem">${message}</div>
+                    </div>
+                </div>`;
+            
+            // Mostrar indicador de carga
+            container.innerHTML += `
+                <div id="agent-typing" style="display:flex;justify-content:flex-start;margin-bottom:1rem">
+                    <div style="background:#f5f5f5;padding:1rem;border-radius:12px">
+                        <i class="fas fa-spinner fa-spin mr-2"></i>El agente está procesando...
+                    </div>
+                </div>`;
+            container.scrollTop = container.scrollHeight;
+            
+            const btn = document.getElementById('btn-send-agent-message');
+            btn.disabled = true;
+            
+            try {
+                const res = await fetch(`/api/agent/sessions/${currentAgentSessionId}/messages`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({message})
+                });
+                const data = await res.json();
+                // Recargar toda la sesión para mostrar la respuesta
+                openAgentSession(currentAgentSessionId);
+            } catch(e) {
+                const typing = document.getElementById('agent-typing');
+                if (typing) typing.remove();
+                container.innerHTML += `
+                    <div style="display:flex;justify-content:flex-start;margin-bottom:1rem">
+                        <div style="background:#fff5f5;padding:1rem;border-radius:12px;border:1px solid #f14668">
+                            <i class="fas fa-exclamation-triangle mr-2 has-text-danger"></i>Error: ${e.message}
+                        </div>
+                    </div>`;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function deleteAgentSession(sessionId) {
+            if (!confirm('¿Eliminar esta sesión?')) return;
+            try {
+                await fetch(`/api/agent/sessions/${sessionId}`, {method: 'DELETE'});
+                if (currentAgentSessionId === sessionId) {
+                    currentAgentSessionId = null;
+                    document.getElementById('agent-chat-card').style.display = 'none';
+                    document.getElementById('agent-placeholder').style.display = 'block';
+                }
+                loadAgentSessions();
+            } catch(e) {}
+        }
+
+        document.getElementById('btn-agent-pdf').addEventListener('click', async () => {
+            if (!currentAgentSessionId) return;
+            window.open(`/api/agent/sessions/${currentAgentSessionId}/pdf`, '_blank');
+        });
+
+        // Búsqueda de imagen desde el agente
+        document.getElementById('btn-agent-search-image').addEventListener('click', async () => {
+            const query = document.getElementById('agent-search-image').value.trim();
+            if (!query) return;
+            try {
+                const res = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({query, top_k: 5})
+                });
+                const data = await res.json();
+                const container = document.getElementById('agent-search-results');
+                if (!data.results || data.results.length === 0) {
+                    container.innerHTML = '<p class="is-size-7 has-text-grey">Sin resultados</p>';
+                    return;
+                }
+                container.innerHTML = data.results.map(r => `
+                    <div class="box is-clickable p-2 mb-1" onclick="document.getElementById('agent-image-select').value='${r.image_name}'">
+                        <div class="level is-mobile">
+                            <div class="level-left">
+                                <img src="/api/images/${r.image_name}/file" style="width:40px;height:40px;object-fit:cover;border-radius:4px" class="mr-2">
+                                <div>
+                                    <p class="is-size-7 has-text-weight-bold">${r.image_name}</p>
+                                    <p class="is-size-7 has-text-grey">${(r.score * 100).toFixed(1)}%</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+            } catch(e) {}
+        });
 
         // ==================== Init ====================
         loadConfigs();

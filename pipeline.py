@@ -23,6 +23,8 @@ class PipelineStep:
     use_previous_output: bool = True
     # Configuración LLM específica para este paso (opcional)
     llm_config_name: Optional[str] = None  # Nombre de la configuración LLM a usar
+    # Si True, la salida de este paso se usa para indexar semánticamente la imagen
+    index_for_search: bool = False
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -31,7 +33,8 @@ class PipelineStep:
             "prompt": self.prompt,
             "order": self.order,
             "use_previous_output": self.use_previous_output,
-            "llm_config_name": self.llm_config_name
+            "llm_config_name": self.llm_config_name,
+            "index_for_search": self.index_for_search
         }
     
     @classmethod
@@ -42,7 +45,8 @@ class PipelineStep:
             prompt=data["prompt"],
             order=data["order"],
             use_previous_output=data.get("use_previous_output", True),
-            llm_config_name=data.get("llm_config_name")
+            llm_config_name=data.get("llm_config_name"),
+            index_for_search=data.get("index_for_search", False)
         )
 
 
@@ -89,7 +93,7 @@ class Pipeline:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     
     def add_step(self, name: str, prompt: str, use_previous_output: bool = True,
-                 llm_config_name: Optional[str] = None) -> PipelineStep:
+                 llm_config_name: Optional[str] = None, index_for_search: bool = False) -> PipelineStep:
         """Agrega un nuevo paso al pipeline"""
         step = PipelineStep(
             id=str(uuid.uuid4()),
@@ -97,7 +101,8 @@ class Pipeline:
             prompt=prompt,
             order=len(self.steps),
             use_previous_output=use_previous_output,
-            llm_config_name=llm_config_name
+            llm_config_name=llm_config_name,
+            index_for_search=index_for_search
         )
         self.steps.append(step)
         return step

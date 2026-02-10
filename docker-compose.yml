@@ -7,23 +7,29 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Persistir datos (configuraciones, pipelines, historial, imágenes)
+      # Persistir datos (configuraciones, pipelines, historial, imágenes, índices, agente)
       - vision_data:/data
+      # Cache de modelos de sentence-transformers (evita re-descarga)
+      - model_cache:/root/.cache
     environment:
-      # Variables de entorno opcionales para API keys (pueden configurarse aquí o en la UI)
+      # Variables de entorno opcionales para API keys
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       # Directorio de datos
       - VISION_LLM_DATA_DIR=/data
+      # Modelo de embeddings para búsqueda semántica (opcional, default: all-MiniLM-L6-v2)
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/statistics"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 30s
 
 volumes:
   vision_data:
+    driver: local
+  model_cache:
     driver: local

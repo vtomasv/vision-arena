@@ -7,6 +7,12 @@ WORKDIR /app
 # Instalar dependencias del sistema
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copiar archivo de requisitos primero (para cache de Docker)
@@ -18,8 +24,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar el código de la aplicación
 COPY . .
 
-# Crear directorio para datos persistentes
-RUN mkdir -p /data
+# Crear directorios para datos persistentes
+RUN mkdir -p /data /data/agent_outputs /data/reports
 
 # Establecer variable de entorno para el directorio de datos
 ENV VISION_LLM_DATA_DIR=/data
