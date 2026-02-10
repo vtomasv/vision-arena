@@ -35,7 +35,7 @@ search_engine = SemanticSearchEngine(os.path.join(data_dir, "search_index"))
 
 # Agente visual
 visual_agent = VisualAgent(
-    sessions_dir=os.path.join(data_dir, "agent_sessions"),
+    base_dir=data_dir,
     config_loader=None  # Se configura después de inicializar storage
 )
 
