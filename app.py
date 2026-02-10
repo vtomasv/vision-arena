@@ -41,9 +41,9 @@ visual_agent = VisualAgent(
 @app.on_event("startup")
 async def startup_event():
     """Inicializar componentes al arrancar"""
-    # Configurar config_loader del agente
+    # Configurar config_loader del agente (usa get_llm_config_full para obtener API key completa)
     def agent_config_loader(name):
-        config = storage.get_llm_config(name)
+        config = storage.get_llm_config_full(name)
         if config:
             return LLMConfig(**config) if isinstance(config, dict) else config
         return None
