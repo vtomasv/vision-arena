@@ -766,8 +766,92 @@ class SemanticSearchEngine:
         
         return image_id
     
+    def index_image(self, image_name: str, image_path: str, 
+                     combined_text: str, metadata: Dict[str, Any] = None) -> Optional[str]:
+        """
+        Indexa una imagen directamente con su texto descriptivo.
+        
+        Args:
+            image_name: Nombre de la imagen
+            image_path: Ruta al archivo de imagen
+            combined_text: Texto combinado de las descripciones
+            metadata: Metadatos adicionales (pipeline_name, execution_id, context_data, etc.)
+        
+        Returns:
+            ID de la imagen indexada o None si falla
+        """
+        if not combined_text or not combined_text.strip():
+            return None
+        
+        try:
+            self._ensure_embeddings_loaded()
+        except ImportError as e:
+            print(f"Warning: Cannot load embeddings: {e}")
+            return None
+        
+        metadata = metadata or {}
+        
+        # Calcular hash de la imagen si existe
+        image_hash = ""
+        if image_path and os.path.exists(image_path):
+            image_hash = self._compute_image_hash(image_path)
+        
+        # Generar ID único
+        execution_id = metadata.get("execution_id", "")
+        image_id = f"{image_hash[:16]}_{execution_id[:8]}" if image_hash else f"{hashlib.md5(image_name.encode()).hexdigest()[:16]}_{execution_id[:8]}"
+        
+        # Crear objeto IndexedImage
+        step_results_data = []
+        if metadata.get("step_results"):
+            step_results_data = metadata["step_results"]
+        else:
+            # Crear un step_result genérico con el texto combinado
+            step_results_data = [{
+                "step_name": "combined_analysis",
+                "step_order": 0,
+                "response_content": combined_text,
+                "model_used": metadata.get("model_used", ""),
+                "provider_used": metadata.get("provider_used", "")
+            }]
+        
+        indexed_image = IndexedImage(
+            id=image_id,
+            image_path=image_path,
+            image_name=image_name,
+            image_hash=image_hash,
+            descriptions=[combined_text],
+            combined_text=combined_text,
+            metadata={
+                "total_latency_ms": metadata.get("total_latency_ms", 0),
+                "total_tokens": metadata.get("total_tokens", 0),
+                "models_used": metadata.get("models_used", [])
+            },
+            pipeline_id=metadata.get("pipeline_id", ""),
+            pipeline_name=metadata.get("pipeline_name", ""),
+            execution_id=execution_id,
+            step_results=step_results_data,
+            indexed_at=datetime.now().isoformat(),
+            context_data=metadata.get("context_data", {})
+        )
+        
+        # Generar embedding del texto combinado
+        embedding = self.embedding_engine.encode_single(combined_text)
+        
+        # Indexar en FAISS
+        if not self.faiss_index._initialized:
+            self.faiss_index.initialize()
+        self.faiss_index.add(image_id, embedding)
+        
+        # Indexar en base de datos relacional
+        self.relational_db.insert_image(indexed_image)
+        
+        # Guardar índice FAISS a disco
+        self.faiss_index.save(self._index_path)
+        
+        return image_id
+
     def search(self, query: str, top_k: int = None, 
-               mode: str = "hybrid") -> List[SearchResult]:
+               mode: str = "hybrid", filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """
         Busca imágenes similares a la query.
         
@@ -812,37 +896,47 @@ class SemanticSearchEngine:
         for image_id, score in sorted(results_map.items(), key=lambda x: x[1], reverse=True)[:top_k]:
             image_data = self.relational_db.get_image(image_id)
             if image_data:
-                indexed_image = IndexedImage(
-                    id=image_data["id"],
-                    image_path=image_data["image_path"],
-                    image_name=image_data["image_name"],
-                    image_hash=image_data.get("image_hash", ""),
-                    combined_text=image_data.get("combined_text", ""),
-                    pipeline_name=image_data.get("pipeline_name", ""),
-                    execution_id=image_data.get("execution_id", ""),
-                    step_results=[{
+                search_results.append({
+                    "image_id": image_data["id"],
+                    "image_name": image_data["image_name"],
+                    "image_path": image_data["image_path"],
+                    "image_hash": image_data.get("image_hash", ""),
+                    "pipeline_name": image_data.get("pipeline_name", ""),
+                    "execution_id": image_data.get("execution_id", ""),
+                    "indexed_at": image_data.get("indexed_at", ""),
+                    "score": round(score, 4),
+                    "rank": len(search_results) + 1,
+                    "match_type": mode,
+                    "combined_text": image_data.get("combined_text", "")[:500],
+                    "descriptions": [{
                         "step_name": d["step_name"],
                         "step_order": d["step_order"],
-                        "response_content": d["description"],
+                        "description": d["description"][:300],
                         "model_used": d["model_used"],
                         "provider_used": d["provider_used"]
                     } for d in image_data.get("descriptions", [])],
-                    indexed_at=image_data.get("indexed_at", ""),
-                    context_data=image_data.get("context_data", {})
-                )
-                
-                search_results.append(SearchResult(
-                    image=indexed_image,
-                    score=score,
-                    rank=len(search_results) + 1,
-                    match_type=mode
-                ))
+                    "attributes": [{
+                        "key": a["attribute_key"],
+                        "value": a["attribute_value"],
+                        "source": a.get("source_step", "")
+                    } for a in image_data.get("attributes", [])[:50]],
+                    "context_data": image_data.get("context_data", {})
+                })
         
         return search_results
     
     def get_image_details(self, image_id: str) -> Optional[Dict[str, Any]]:
-        """Obtiene los detalles completos de una imagen indexada"""
+        """Obtiene los detalles completos de una imagen indexada por ID"""
         return self.relational_db.get_image(image_id)
+    
+    def get_image_details_by_name(self, image_name: str) -> Optional[Dict[str, Any]]:
+        """Obtiene los detalles completos de una imagen indexada por nombre"""
+        cursor = self.relational_db.conn.cursor()
+        cursor.execute("SELECT id FROM images WHERE image_name = ? ORDER BY indexed_at DESC LIMIT 1", (image_name,))
+        row = cursor.fetchone()
+        if row:
+            return self.relational_db.get_image(row[0])
+        return None
     
     def get_all_indexed(self) -> List[Dict[str, Any]]:
         """Obtiene todas las imágenes indexadas"""

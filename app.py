@@ -29,7 +29,8 @@ app = FastAPI(title="Vision LLM Comparator", version="3.0.0")
 storage = StorageManager()
 
 # Motor de búsqueda semántica
-data_dir = os.environ.get("DATA_DIR", "./data")
+# Use the same base directory as StorageManager for consistency
+data_dir = os.environ.get("DATA_DIR", os.path.join(os.path.expanduser("~"), ".vision_llm_comparator"))
 search_engine = SemanticSearchEngine(os.path.join(data_dir, "search_index"))
 
 # Agente visual
@@ -697,56 +698,102 @@ class SearchRequest(BaseModel):
 @app.post("/api/search")
 async def semantic_search(request: SearchRequest):
     """Buscar imágenes por descripción semántica"""
-    results = search_engine.search(request.query, request.top_k, request.filters)
-    return {"results": results, "query": request.query, "total": len(results)}
+    try:
+        results = search_engine.search(request.query, request.top_k, filters=request.filters)
+        return {"results": results, "query": request.query, "total": len(results)}
+    except Exception as e:
+        return {"results": [], "query": request.query, "total": 0, "error": str(e)}
 
 @app.get("/api/search/stats")
 async def search_stats():
     """Obtener estadísticas del índice semántico"""
-    return search_engine.get_stats()
+    stats = search_engine.get_stats()
+    # Map field names for frontend compatibility
+    return {
+        "total_images": stats.get("total_indexed_images", 0),
+        "total_indexed_images": stats.get("total_indexed_images", 0),
+        "total_descriptions": stats.get("total_descriptions", 0),
+        "total_attributes": stats.get("total_attributes", 0),
+        "total_documents": stats.get("total_descriptions", 0),
+        "unique_attribute_keys": stats.get("unique_attribute_keys", 0),
+        "faiss_vectors": stats.get("faiss_vectors", 0),
+        "vector_dimension": stats.get("config", {}).get("embedding_dim", 384),
+        "embeddings_loaded": stats.get("embeddings_loaded", False),
+        "config": stats.get("config", {}),
+        "last_updated": "N/A"
+    }
 
 @app.post("/api/search/reindex")
 async def reindex_all():
     """Reindexar todas las ejecuciones existentes"""
     count = 0
-    executions = storage.list_executions(limit=1000)
-    for exec_summary in executions:
-        exec_id = exec_summary.get("id", "")
-        exec_data = storage.get_execution_details(exec_id)
-        if not exec_data:
-            continue
-        image_name = exec_data.get("image_name", "")
-        image_path = str(storage.images_dir / image_name)
-        pipeline_name = exec_data.get("pipeline_name", "")
-        
-        # Buscar pipeline para verificar index_for_search
-        index_texts = []
-        for step_result in exec_data.get("step_results", []):
-            content = step_result.get("content", "")
-            if content:
-                index_texts.append(content)
-        
-        if index_texts:
-            combined_text = "\n".join(index_texts)
-            metadata = {
-                "image_name": image_name,
-                "image_path": image_path,
-                "pipeline_name": pipeline_name,
-                "execution_id": exec_id,
-                "context_data": exec_data.get("context_data", {})
-            }
-            search_engine.index_image(image_name, image_path, combined_text, metadata)
-            count += 1
+    errors = []
+    try:
+        executions = storage.list_executions(limit=1000)
+        for exec_summary in executions:
+            exec_id = exec_summary.get("id", "")
+            try:
+                exec_data = storage.get_execution_details(exec_id)
+                if not exec_data:
+                    continue
+                image_name = exec_data.get("image_name", "")
+                image_path = str(storage.images_dir / image_name)
+                pipeline_name = exec_data.get("pipeline_name", "")
+                
+                # Recopilar textos de todos los pasos
+                index_texts = []
+                for step_result in exec_data.get("step_results", []):
+                    content = step_result.get("content", "")
+                    if content:
+                        index_texts.append(content)
+                
+                if index_texts:
+                    combined_text = "\n".join(index_texts)
+                    metadata = {
+                        "image_name": image_name,
+                        "image_path": image_path,
+                        "pipeline_name": pipeline_name,
+                        "execution_id": exec_id,
+                        "context_data": exec_data.get("context_data", {})
+                    }
+                    search_engine.index_image(image_name, image_path, combined_text, metadata)
+                    count += 1
+            except Exception as e:
+                errors.append(f"{exec_id}: {str(e)}")
+    except Exception as e:
+        return {"status": "error", "error": str(e), "indexed": count}
     
-    return {"status": "ok", "indexed": count}
+    result = {"status": "ok", "indexed": count}
+    if errors:
+        result["errors"] = errors[:10]  # Limit error messages
+    return result
 
 @app.get("/api/search/image-details/{image_name}")
 async def get_image_search_details(image_name: str):
-    """Obtener todos los datos indexados de una imagen"""
-    details = search_engine.get_image_details(image_name)
+    """Obtener todos los datos indexados de una imagen por nombre"""
+    details = search_engine.get_image_details_by_name(image_name)
+    if not details:
+        # Fallback: try by ID
+        details = search_engine.get_image_details(image_name)
     if not details:
         raise HTTPException(status_code=404, detail="Image not found in index")
-    return details
+    # Map fields for frontend compatibility
+    return {
+        "image_id": details.get("id", ""),
+        "image_name": details.get("image_name", image_name),
+        "image_path": details.get("image_path", ""),
+        "image_hash": details.get("image_hash", ""),
+        "description": details.get("combined_text", ""),
+        "combined_text": details.get("combined_text", ""),
+        "pipeline_name": details.get("pipeline_name", ""),
+        "execution_id": details.get("execution_id", ""),
+        "indexed_at": details.get("indexed_at", ""),
+        "descriptions": details.get("descriptions", []),
+        "attributes": details.get("attributes", []),
+        "metadata": {
+            "context_data": details.get("context_data", {})
+        }
+    }
 
 # --- Visual Agent ---
 
@@ -2963,9 +3010,11 @@ HTML_TEMPLATE = """
                 document.getElementById('search-stats-content').innerHTML = `
                     <div class="content">
                         <p><strong>Imágenes indexadas:</strong> ${stats.total_images || 0}</p>
-                        <p><strong>Documentos totales:</strong> ${stats.total_documents || 0}</p>
+                        <p><strong>Descripciones totales:</strong> ${stats.total_descriptions || 0}</p>
+                        <p><strong>Atributos totales:</strong> ${stats.total_attributes || 0}</p>
+                        <p><strong>Vectores FAISS:</strong> ${stats.faiss_vectors || 0}</p>
                         <p><strong>Dimensión vectorial:</strong> ${stats.vector_dimension || 'N/A'}</p>
-                        <p><strong>Última actualización:</strong> ${stats.last_updated || 'Nunca'}</p>
+                        <p><strong>Embeddings cargados:</strong> ${stats.embeddings_loaded ? 'Sí' : 'No'}</p>
                     </div>
                 `;
             } catch(e) {
@@ -3014,7 +3063,7 @@ HTML_TEMPLATE = """
                             <div class="card is-clickable" onclick="showImageDetail('${r.image_name}')" style="height:100%">
                                 <div class="card-image">
                                     <figure class="image is-4by3">
-                                        <img src="/api/images/${r.image_name}/file" alt="${r.image_name}" 
+                                        <img src="/api/images/view/${r.image_name}" alt="${r.image_name}" 
                                             style="object-fit:cover;width:100%;height:100%">
                                     </figure>
                                 </div>
@@ -3031,7 +3080,7 @@ HTML_TEMPLATE = """
                                         </div>
                                     </div>
                                     <p class="is-size-7 has-text-grey mt-1" style="max-height:60px;overflow:hidden">
-                                        ${(r.description || '').substring(0, 150)}...
+                                        ${(r.combined_text || r.description || '').substring(0, 150)}...
                                     </p>
                                 </div>
                             </div>
@@ -3068,7 +3117,7 @@ HTML_TEMPLATE = """
                     <div class="columns">
                         <div class="column is-5">
                             <figure class="image">
-                                <img src="/api/images/${imageName}/file" alt="${imageName}" style="border-radius:8px;max-height:500px;object-fit:contain">
+                                <img src="/api/images/view/${imageName}" alt="${imageName}" style="border-radius:8px;max-height:500px;object-fit:contain">
                             </figure>
                         </div>
                         <div class="column is-7">
