@@ -15,7 +15,7 @@ from llm_providers import LLMConfig, LLMResponse, create_provider, substitute_va
 
 @dataclass
 class PipelineStep:
-    """Un paso individual en el pipeline - puede tener su propio modelo LLM"""
+    """Un paso individual en el pipeline - puede tener su propio modelo LLM, agente y skills"""
     id: str
     name: str
     prompt: str
@@ -25,6 +25,10 @@ class PipelineStep:
     llm_config_name: Optional[str] = None  # Nombre de la configuración LLM a usar
     # Si True, la salida de este paso se usa para indexar semánticamente la imagen
     index_for_search: bool = False
+    # Agente asignado a este paso (opcional)
+    agent_id: Optional[str] = None
+    # Skills asignados a este paso (opcional)
+    skill_ids: List[str] = field(default_factory=list)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -34,7 +38,9 @@ class PipelineStep:
             "order": self.order,
             "use_previous_output": self.use_previous_output,
             "llm_config_name": self.llm_config_name,
-            "index_for_search": self.index_for_search
+            "index_for_search": self.index_for_search,
+            "agent_id": self.agent_id,
+            "skill_ids": self.skill_ids,
         }
     
     @classmethod
@@ -46,7 +52,9 @@ class PipelineStep:
             order=data["order"],
             use_previous_output=data.get("use_previous_output", True),
             llm_config_name=data.get("llm_config_name"),
-            index_for_search=data.get("index_for_search", False)
+            index_for_search=data.get("index_for_search", False),
+            agent_id=data.get("agent_id"),
+            skill_ids=data.get("skill_ids", []),
         )
 
 
@@ -93,7 +101,8 @@ class Pipeline:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     
     def add_step(self, name: str, prompt: str, use_previous_output: bool = True,
-                 llm_config_name: Optional[str] = None, index_for_search: bool = False) -> PipelineStep:
+                 llm_config_name: Optional[str] = None, index_for_search: bool = False,
+                 agent_id: Optional[str] = None, skill_ids: List[str] = None) -> PipelineStep:
         """Agrega un nuevo paso al pipeline"""
         step = PipelineStep(
             id=str(uuid.uuid4()),
@@ -102,7 +111,9 @@ class Pipeline:
             order=len(self.steps),
             use_previous_output=use_previous_output,
             llm_config_name=llm_config_name,
-            index_for_search=index_for_search
+            index_for_search=index_for_search,
+            agent_id=agent_id,
+            skill_ids=skill_ids or [],
         )
         self.steps.append(step)
         return step

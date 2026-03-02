@@ -23,9 +23,11 @@ from storage import StorageManager
 from pdf_generator import generate_forensic_report
 from semantic_search import SemanticSearchEngine
 from visual_agent import VisualAgent, ensure_image_packages
+from cases_api import router as cases_router
 
 # Inicializar aplicación
 app = FastAPI(title="Vision LLM Comparator", version="3.0.0")
+app.include_router(cases_router)
 storage = StorageManager()
 
 # Motor de búsqueda semántica
@@ -74,6 +76,8 @@ class PipelineStepCreate(BaseModel):
     use_previous_output: bool = True
     llm_config_name: Optional[str] = None
     index_for_search: bool = False
+    agent_id: Optional[str] = None
+    skill_ids: List[str] = []
 
 class PipelineCreate(BaseModel):
     name: str
@@ -178,7 +182,9 @@ async def create_pipeline(pipeline_data: PipelineCreate):
             prompt=step.prompt,
             use_previous_output=step.use_previous_output,
             llm_config_name=step.llm_config_name,
-            index_for_search=step.index_for_search
+            index_for_search=step.index_for_search,
+            agent_id=step.agent_id,
+            skill_ids=step.skill_ids,
         )
     
     storage.save_pipeline(pipeline)
@@ -218,7 +224,9 @@ async def update_pipeline(pipeline_id: str, pipeline_data: PipelineCreate):
             prompt=step.prompt,
             use_previous_output=step.use_previous_output,
             llm_config_name=step.llm_config_name,
-            index_for_search=step.index_for_search
+            index_for_search=step.index_for_search,
+            agent_id=step.agent_id,
+            skill_ids=step.skill_ids,
         )
     
     storage.save_pipeline(pipeline)
@@ -893,6 +901,11 @@ HTML_TEMPLATE = """
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <!-- Leaflet for maps -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
     <style>
         :root {
             --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -1083,6 +1096,33 @@ HTML_TEMPLATE = """
         .agent-image-output img:hover { transform: scale(1.02); }
         .agent-image-caption { font-size: 0.8rem; color: #888; margin-top: 0.25rem; }
         .agent-msg-meta { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-size: 0.75rem; color: #999; }
+        /* Cases Module Styles */
+        .cases-dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+        .dash-stat { background: white; border-radius: 12px; padding: 1.25rem; text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,0.08); transition: transform 0.2s; }
+        .dash-stat:hover { transform: translateY(-3px); }
+        .dash-stat .stat-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+        .dash-stat .stat-value { font-size: 2rem; font-weight: 700; }
+        .dash-stat .stat-label { font-size: 0.85rem; color: #666; margin-top: 0.25rem; }
+        .case-card { border-left: 4px solid #667eea; transition: all 0.3s; cursor: pointer; }
+        .case-card:hover { transform: translateX(5px); box-shadow: 0 4px 20px rgba(0,0,0,0.12); }
+        .case-card.status-abierto { border-left-color: #48c774; }
+        .case-card.status-en_progreso { border-left-color: #ffdd57; }
+        .case-card.status-archivado { border-left-color: #b5b5b5; }
+        .agent-def-card, .skill-def-card { border-radius: 12px; padding: 1.25rem; background: white; box-shadow: 0 2px 10px rgba(0,0,0,0.08); transition: all 0.3s; border-left: 4px solid #667eea; }
+        .agent-def-card:hover, .skill-def-card:hover { transform: translateY(-3px); box-shadow: 0 6px 20px rgba(0,0,0,0.12); }
+        .workflow-step-card { background: #f8f9fa; border-radius: 10px; padding: 1rem; margin-bottom: 0.75rem; border-left: 4px solid #667eea; position: relative; }
+        .workflow-step-card .step-number { position: absolute; top: -8px; left: -8px; width: 28px; height: 28px; border-radius: 50%; background: #667eea; color: white; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.8rem; }
+        .workflow-connector { width: 2px; height: 20px; background: #667eea; margin: 0 auto; }
+        .folder-tree-item { padding: 0.5rem 0.75rem; border-radius: 6px; cursor: pointer; transition: background 0.2s; display: flex; align-items: center; gap: 0.5rem; }
+        .folder-tree-item:hover { background: #f0f0f0; }
+        .folder-tree-item.active { background: #e8ecff; color: #667eea; font-weight: 600; }
+        .file-item { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; border-bottom: 1px solid #f0f0f0; }
+        .evidence-map { height: 400px; border-radius: 12px; overflow: hidden; }
+        .priority-alta { color: #f14668; font-weight: 600; }
+        .priority-media { color: #ffdd57; font-weight: 600; }
+        .priority-baja { color: #48c774; font-weight: 600; }
+        .skill-tag { display: inline-flex; align-items: center; gap: 0.25rem; background: #e8ecff; color: #667eea; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; margin: 0.1rem; }
+        .md-preview { background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 1rem; max-height: 300px; overflow-y: auto; }
     </style>
 </head>
 <body>
@@ -1130,6 +1170,18 @@ HTML_TEMPLATE = """
                     </li>
                     <li data-tab="agent">
                         <a><i class="fas fa-robot mr-2"></i>Agente Visual</a>
+                    </li>
+                    <li data-tab="cases-dashboard" style="border-left: 2px solid #667eea; margin-left: 0.5rem; padding-left: 0.5rem;">
+                        <a><i class="fas fa-tachometer-alt mr-2"></i>Dashboard</a>
+                    </li>
+                    <li data-tab="cases-list">
+                        <a><i class="fas fa-briefcase mr-2"></i>Casos</a>
+                    </li>
+                    <li data-tab="cases-agents">
+                        <a><i class="fas fa-robot mr-2"></i>Agentes</a>
+                    </li>
+                    <li data-tab="cases-skills">
+                        <a><i class="fas fa-puzzle-piece mr-2"></i>Skills</a>
                     </li>
                 </ul>
             </div>
@@ -1799,6 +1851,218 @@ HTML_TEMPLATE = """
                 </div>
             </div>
         </div>
+
+        <!-- Tab: Cases Dashboard -->
+        <div id="tab-cases-dashboard" class="tab-content">
+            <div class="cases-dashboard-grid" id="dashboard-stats"></div>
+            <div class="columns">
+                <div class="column is-6">
+                    <div class="card">
+                        <header class="card-header"><p class="card-header-title"><i class="fas fa-tasks mr-2"></i>Tareas Pendientes</p></header>
+                        <div class="card-content" id="dashboard-pending-tasks"><p class="has-text-grey">Cargando...</p></div>
+                    </div>
+                </div>
+                <div class="column is-6">
+                    <div class="card">
+                        <header class="card-header"><p class="card-header-title"><i class="fas fa-briefcase mr-2"></i>Casos Recientes</p></header>
+                        <div class="card-content" id="dashboard-recent-cases"><p class="has-text-grey">Cargando...</p></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab: Cases List -->
+        <div id="tab-cases-list" class="tab-content">
+            <div class="level mb-4">
+                <div class="level-left">
+                    <div class="field has-addons">
+                        <p class="control"><button class="button is-small" onclick="filterCases('')">Todos</button></p>
+                        <p class="control"><button class="button is-small is-success" onclick="filterCases('abierto')">Abiertos</button></p>
+                        <p class="control"><button class="button is-small is-warning" onclick="filterCases('en_progreso')">En Progreso</button></p>
+                        <p class="control"><button class="button is-small is-light" onclick="filterCases('archivado')">Archivados</button></p>
+                    </div>
+                </div>
+                <div class="level-right">
+                    <button class="button is-primary" onclick="showCreateCaseModal()">
+                        <i class="fas fa-plus mr-2"></i>Nuevo Caso
+                    </button>
+                </div>
+            </div>
+            <div id="cases-list-container"></div>
+        </div>
+
+        <!-- Tab: Agents -->
+        <div id="tab-cases-agents" class="tab-content">
+            <div class="level mb-4">
+                <div class="level-left"><h2 class="title is-4"><i class="fas fa-robot mr-2"></i>Agentes del Sistema</h2></div>
+                <div class="level-right">
+                    <button class="button is-primary" onclick="showCreateAgentModal()">
+                        <i class="fas fa-plus mr-2"></i>Nuevo Agente
+                    </button>
+                </div>
+            </div>
+            <div id="agents-grid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(320px,1fr)); gap:1rem;"></div>
+        </div>
+
+        <!-- Tab: Skills -->
+        <div id="tab-cases-skills" class="tab-content">
+            <div class="level mb-4">
+                <div class="level-left"><h2 class="title is-4"><i class="fas fa-puzzle-piece mr-2"></i>Skills del Sistema</h2></div>
+                <div class="level-right">
+                    <button class="button is-primary" onclick="showCreateSkillModal()">
+                        <i class="fas fa-plus mr-2"></i>Nuevo Skill
+                    </button>
+                </div>
+            </div>
+            <div class="field mb-4">
+                <div class="buttons" id="skill-category-filters"></div>
+            </div>
+            <div id="skills-grid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(320px,1fr)); gap:1rem;"></div>
+        </div>
+
+    </div>
+
+    <!-- Modals -->
+    <!-- Create/Edit Case Modal -->
+    <div class="modal" id="modal-case">
+        <div class="modal-background" onclick="closeCaseModal()"></div>
+        <div class="modal-card" style="max-width:640px;">
+            <header class="modal-card-head"><p class="modal-card-title" id="modal-case-title">Nuevo Caso</p><button class="delete" onclick="closeCaseModal()"></button></header>
+            <section class="modal-card-body">
+                <input type="hidden" id="case-edit-id">
+                <div class="field"><label class="label">Nombre del Caso</label><input class="input" id="case-name" placeholder="Ej: Caso 2026-001"></div>
+                <div class="field"><label class="label">Descripci\u00f3n</label><textarea class="textarea" id="case-description" rows="3" placeholder="Descripci\u00f3n del caso..."></textarea></div>
+                <div class="field"><label class="label">Tipo</label><div class="select is-fullwidth"><select id="case-type"><option value="investigacion">Investigaci\u00f3n</option><option value="penal">Penal</option><option value="civil">Civil</option><option value="investigacion_interna">Investigaci\u00f3n Interna</option></select></div></div>
+                <div class="field"><label class="label">Etiquetas (separadas por coma)</label><input class="input" id="case-tags" placeholder="urgente, vehiculo, zona-norte"></div>
+            </section>
+            <footer class="modal-card-foot"><button class="button is-primary" onclick="saveCase()">Guardar</button><button class="button" onclick="closeCaseModal()">Cancelar</button></footer>
+        </div>
+    </div>
+
+    <!-- Case Detail Modal -->
+    <div class="modal" id="modal-case-detail">
+        <div class="modal-background" onclick="closeCaseDetailModal()"></div>
+        <div class="modal-card" style="max-width:900px; max-height:90vh;">
+            <header class="modal-card-head">
+                <p class="modal-card-title" id="case-detail-title">Detalle del Caso</p>
+                <button class="delete" onclick="closeCaseDetailModal()"></button>
+            </header>
+            <section class="modal-card-body" style="overflow-y:auto;">
+                <div class="tabs is-small is-boxed" id="case-detail-tabs">
+                    <ul>
+                        <li class="is-active" data-case-tab="info"><a>Informaci\u00f3n</a></li>
+                        <li data-case-tab="tasks"><a><i class="fas fa-tasks mr-1"></i>Tareas</a></li>
+                        <li data-case-tab="files"><a><i class="fas fa-folder mr-1"></i>Archivos</a></li>
+                        <li data-case-tab="evidence"><a><i class="fas fa-map-marker-alt mr-1"></i>Evidencias</a></li>
+                        <li data-case-tab="audit"><a><i class="fas fa-history mr-1"></i>Auditor\u00eda</a></li>
+                    </ul>
+                </div>
+                <div id="case-detail-content"></div>
+            </section>
+        </div>
+    </div>
+
+    <!-- Create/Edit Task Modal -->
+    <div class="modal" id="modal-task">
+        <div class="modal-background" onclick="closeTaskModal()"></div>
+        <div class="modal-card" style="max-width:800px; width:90vw; max-height:90vh;">
+            <header class="modal-card-head"><p class="modal-card-title" id="modal-task-title">Nueva Tarea</p><button class="delete" onclick="closeTaskModal()"></button></header>
+            <section class="modal-card-body" style="overflow-y:auto; max-height:70vh;">
+                <input type="hidden" id="task-edit-id">
+                <input type="hidden" id="task-case-id">
+                <div class="columns">
+                    <div class="column is-5">
+                        <div class="field"><label class="label">Nombre</label><input class="input" id="task-name" placeholder="Nombre de la tarea"></div>
+                    </div>
+                    <div class="column is-4">
+                        <div class="field"><label class="label">Tipo</label>
+                            <input type="hidden" id="task-type" value="humana">
+                            <div class="buttons has-addons" id="task-type-buttons" style="flex-wrap:nowrap;">
+                                <button class="button is-small is-primary" data-type="humana" onclick="setTaskType('humana')"><i class="fas fa-user mr-1"></i>Humana</button>
+                                <button class="button is-small" data-type="agente" onclick="setTaskType('agente')"><i class="fas fa-robot mr-1"></i>Agente</button>
+                                <button class="button is-small" data-type="workflow" onclick="setTaskType('workflow')"><i class="fas fa-project-diagram mr-1"></i>Workflow</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="column is-2">
+                        <div class="field"><label class="label">Prioridad</label><div class="select is-fullwidth"><select id="task-priority"><option value="alta">Alta</option><option value="media" selected>Media</option><option value="baja">Baja</option></select></div></div>
+                    </div>
+                </div>
+                <div class="field"><label class="label">Descripci\u00f3n</label><textarea class="textarea" id="task-description" rows="2"></textarea></div>
+                <div class="field" id="task-agent-field" style="display:none;">
+                    <label class="label">Agente Asignado</label>
+                    <div class="select is-fullwidth"><select id="task-agent-id"></select></div>
+                </div>
+                <div id="task-workflow-section" style="display:none;">
+                    <hr>
+                    <h4 class="title is-5"><i class="fas fa-project-diagram mr-2"></i>Pasos del Workflow</h4>
+                    <div id="task-workflow-steps"></div>
+                    <button class="button is-small is-info mt-2" onclick="addTaskWorkflowStep()">
+                        <i class="fas fa-plus mr-1"></i>Agregar Paso
+                    </button>
+                </div>
+                <div class="columns mt-3">
+                    <div class="column is-6">
+                        <div class="field"><label class="checkbox"><input type="checkbox" id="task-recurring" onchange="toggleRecurrence()"> Tarea recurrente</label></div>
+                    </div>
+                    <div class="column is-3" id="task-recurrence-pattern-field" style="display:none;">
+                        <div class="field"><label class="label">Frecuencia</label><div class="select is-fullwidth"><select id="task-recurrence-pattern"><option value="diaria">Diaria</option><option value="semanal">Semanal</option><option value="mensual">Mensual</option></select></div></div>
+                    </div>
+                    <div class="column is-3" id="task-recurrence-time-field" style="display:none;">
+                        <div class="field"><label class="label">Hora</label><input class="input" type="time" id="task-recurrence-time" value="09:00"></div>
+                    </div>
+                </div>
+            </section>
+            <footer class="modal-card-foot"><button class="button is-primary" onclick="saveTask()">Guardar Tarea</button><button class="button" onclick="closeTaskModal()">Cancelar</button></footer>
+        </div>
+    </div>
+
+    <!-- Create/Edit Agent Modal -->
+    <div class="modal" id="modal-agent">
+        <div class="modal-background" onclick="closeAgentModal()"></div>
+        <div class="modal-card" style="max-width:700px; max-height:90vh;">
+            <header class="modal-card-head"><p class="modal-card-title" id="modal-agent-title">Nuevo Agente</p><button class="delete" onclick="closeAgentModal()"></button></header>
+            <section class="modal-card-body" style="overflow-y:auto;">
+                <input type="hidden" id="agent-edit-id">
+                <div class="columns">
+                    <div class="column is-8"><div class="field"><label class="label">Nombre</label><input class="input" id="agent-name" placeholder="Nombre del agente"></div></div>
+                    <div class="column is-4"><div class="field"><label class="label">Categor\u00eda</label><input class="input" id="agent-category" placeholder="forense"></div></div>
+                </div>
+                <div class="field"><label class="label">Descripci\u00f3n</label><textarea class="textarea" id="agent-description" rows="2"></textarea></div>
+                <div class="columns">
+                    <div class="column is-4"><div class="field"><label class="label">Icono (FontAwesome)</label><input class="input" id="agent-icon" value="fas fa-robot" placeholder="fas fa-robot"></div></div>
+                    <div class="column is-4"><div class="field"><label class="label">Color</label><input class="input" type="color" id="agent-color" value="#4361ee"></div></div>
+                    <div class="column is-4"><div class="field"><label class="label">LLM Config</label><div class="select is-fullwidth"><select id="agent-llm-config"><option value="">Por defecto</option></select></div></div></div>
+                </div>
+                <div class="field"><label class="label">System Prompt</label><textarea class="textarea" id="agent-system-prompt" rows="3" placeholder="Instrucciones del sistema para el agente..."></textarea></div>
+                <div class="field"><label class="label">AGENTS.md</label><textarea class="textarea" id="agent-md" rows="8" placeholder="# AGENTS.md\n\n## Rol\n..." style="font-family:monospace;font-size:0.85rem;"></textarea></div>
+                <div class="field"><label class="label">Skills Asociados</label><div id="agent-skills-selector"></div></div>
+            </section>
+            <footer class="modal-card-foot"><button class="button is-primary" onclick="saveAgent()">Guardar Agente</button><button class="button" onclick="closeAgentModal()">Cancelar</button></footer>
+        </div>
+    </div>
+
+    <!-- Create/Edit Skill Modal -->
+    <div class="modal" id="modal-skill">
+        <div class="modal-background" onclick="closeSkillModal()"></div>
+        <div class="modal-card" style="max-width:700px; max-height:90vh;">
+            <header class="modal-card-head"><p class="modal-card-title" id="modal-skill-title">Nuevo Skill</p><button class="delete" onclick="closeSkillModal()"></button></header>
+            <section class="modal-card-body" style="overflow-y:auto;">
+                <input type="hidden" id="skill-edit-id">
+                <div class="columns">
+                    <div class="column is-8"><div class="field"><label class="label">Nombre (lowercase, hyphens)</label><input class="input" id="skill-name" placeholder="mi-nuevo-skill"></div></div>
+                    <div class="column is-4"><div class="field"><label class="label">Categor\u00eda</label><div class="select is-fullwidth"><select id="skill-category"><option value="analisis">An\u00e1lisis</option><option value="deteccion">Detecci\u00f3n</option><option value="mejora">Mejora</option><option value="segmentacion">Segmentaci\u00f3n</option><option value="meta">Meta</option><option value="general">General</option></select></div></div></div>
+                </div>
+                <div class="field"><label class="label">Descripci\u00f3n</label><textarea class="textarea" id="skill-description" rows="2" placeholder="Qu\u00e9 hace este skill y cu\u00e1ndo usarlo..."></textarea></div>
+                <div class="columns">
+                    <div class="column is-4"><div class="field"><label class="label">Icono</label><input class="input" id="skill-icon" value="fas fa-cog"></div></div>
+                    <div class="column is-4"><div class="field"><label class="label">Color</label><input class="input" type="color" id="skill-color" value="#4361ee"></div></div>
+                    <div class="column is-4"><div class="field"><label class="label">Licencia</label><input class="input" id="skill-license" placeholder="Apache-2.0"></div></div>
+                </div>
+                <div class="field"><label class="label">SKILL.md (Instrucciones)</label><textarea class="textarea" id="skill-md" rows="10" placeholder="## Instrucciones\n\n### Paso 1: ..." style="font-family:monospace;font-size:0.85rem;"></textarea></div>
+            </section>
+            <footer class="modal-card-foot"><button class="button is-primary" onclick="saveSkill()">Guardar Skill</button><button class="button" onclick="closeSkillModal()">Cancelar</button></footer>
+        </div>
     </div>
 
     <script>
@@ -1830,6 +2094,10 @@ HTML_TEMPLATE = """
                 if (tabId === 'statistics') loadStatistics();
                 if (tabId === 'search') loadSearchStats();
                 if (tabId === 'agent') { loadAgentSessions(); loadAgentImages(); loadAgentLLMs(); }
+                if (tabId === 'cases-dashboard') loadCasesDashboard();
+                if (tabId === 'cases-list') loadCasesList();
+                if (tabId === 'cases-agents') loadAgentDefinitions();
+                if (tabId === 'cases-skills') loadSkillDefinitions();
             });
         });
 
@@ -2068,8 +2336,29 @@ HTML_TEMPLATE = """
                         <input class="input is-small" type="text" placeholder="Nombre del paso" 
                             value="${step.name}" onchange="updateStep(${i}, 'name', this.value)">
                     </div>
+                    <div class="columns is-mobile mb-0">
+                        <div class="column is-6">
+                            <div class="field">
+                                <label class="label is-small"><i class="fas fa-robot mr-1"></i>Agente</label>
+                                <div class="select is-small is-fullwidth">
+                                    <select onchange="updateStep(${i}, 'agent_id', this.value)">
+                                        <option value="">Sin agente</option>
+                                        ${getPipelineAgentOptions(step.agent_id)}
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="column is-6">
+                            <div class="field">
+                                <label class="label is-small"><i class="fas fa-puzzle-piece mr-1"></i>Skills</label>
+                                <select multiple class="is-small" id="pipe-step-skills-${i}" style="width:100%;height:60px;font-size:0.75rem;border:1px solid #dbdbdb;border-radius:4px;" onchange="updatePipeStepSkills(${i})">
+                                    ${getPipelineSkillOptions(step.skill_ids)}
+                                </select>
+                            </div>
+                        </div>
+                    </div>
                     <div class="field">
-                        <textarea class="textarea is-small" rows="3" placeholder="Prompt (usa $variable para variables JSON)"
+                        <textarea class="textarea is-small" rows="3" placeholder="Prompt (usa $variable para variables JSON). Se combinará con el agent.md y skills seleccionados."
                             onchange="updateStep(${i}, 'prompt', this.value)">${step.prompt}</textarea>
                     </div>
                     <div class="field">
@@ -2107,8 +2396,37 @@ HTML_TEMPLATE = """
             ).join('');
         }
 
+        let pipelineAgentsCache = [];
+        let pipelineSkillsCache = [];
+        async function loadPipelineAgentsSkills() {
+            try {
+                const [agRes, skRes] = await Promise.all([
+                    fetch('/api/cases/agents'), fetch('/api/cases/skills')
+                ]);
+                if (agRes.ok) pipelineAgentsCache = await agRes.json();
+                if (skRes.ok) pipelineSkillsCache = await skRes.json();
+            } catch(e) { console.log('Could not load agents/skills for pipelines'); }
+        }
+        loadPipelineAgentsSkills();
+
+        function getPipelineAgentOptions(selected) {
+            return pipelineAgentsCache.map(a => 
+                `<option value="${a.id}" ${a.id === selected ? 'selected' : ''}>${a.name}</option>`
+            ).join('');
+        }
+        function getPipelineSkillOptions(selectedIds) {
+            const ids = selectedIds || [];
+            return pipelineSkillsCache.map(s => 
+                `<option value="${s.id}" ${ids.includes(s.id) ? 'selected' : ''}>${s.id}</option>`
+            ).join('');
+        }
+        function updatePipeStepSkills(idx) {
+            const sel = document.getElementById('pipe-step-skills-' + idx);
+            pipelineSteps[idx].skill_ids = Array.from(sel.selectedOptions).map(o => o.value);
+        }
+
         document.getElementById('btn-add-step').addEventListener('click', () => {
-            pipelineSteps.push({name: '', prompt: '', use_previous_output: true, llm_config_name: null, index_for_search: false});
+            pipelineSteps.push({name: '', prompt: '', use_previous_output: true, llm_config_name: null, index_for_search: false, agent_id: '', skill_ids: []});
             renderPipelineSteps();
         });
 
@@ -3557,6 +3875,652 @@ HTML_TEMPLATE = """
                 `).join('');
             } catch(e) {}
         });
+
+        // ==================== Cases Module State ====================
+        let casesAgentsCache = [];
+        let casesSkillsCache = [];
+        let currentCaseId = null;
+        let currentCaseData = null;
+        let taskWorkflowSteps = [];
+        let currentCaseFilter = '';
+        let evidenceMap = null;
+        let drawnPolygon = null;
+
+        // ==================== Cases Dashboard ====================
+        async function loadCasesDashboard() {
+            try {
+                const res = await fetch('/api/cases/dashboard');
+                const data = await res.json();
+                document.getElementById('dashboard-stats').innerHTML = `
+                    <div class="dash-stat"><div class="stat-icon" style="color:#48c774"><i class="fas fa-briefcase"></i></div><div class="stat-value">${data.total_cases}</div><div class="stat-label">Total Casos</div></div>
+                    <div class="dash-stat"><div class="stat-icon" style="color:#667eea"><i class="fas fa-folder-open"></i></div><div class="stat-value">${data.active_cases}</div><div class="stat-label">Casos Activos</div></div>
+                    <div class="dash-stat"><div class="stat-icon" style="color:#f14668"><i class="fas fa-tasks"></i></div><div class="stat-value">${data.total_tasks}</div><div class="stat-label">Total Tareas</div></div>
+                    <div class="dash-stat"><div class="stat-icon" style="color:#ffdd57"><i class="fas fa-clock"></i></div><div class="stat-value">${data.tasks_by_status.pendiente || 0}</div><div class="stat-label">Tareas Pendientes</div></div>
+                    <div class="dash-stat"><div class="stat-icon" style="color:#2a9d8f"><i class="fas fa-robot"></i></div><div class="stat-value">${data.total_agents}</div><div class="stat-label">Agentes</div></div>
+                    <div class="dash-stat"><div class="stat-icon" style="color:#e9c46a"><i class="fas fa-puzzle-piece"></i></div><div class="stat-value">${data.total_skills}</div><div class="stat-label">Skills</div></div>
+                `;
+                // Pending tasks
+                const ptasks = data.pending_tasks || [];
+                document.getElementById('dashboard-pending-tasks').innerHTML = ptasks.length ? ptasks.map(t => `
+                    <div class="file-item"><div><strong>${t.name}</strong><br><span class="is-size-7 has-text-grey">${t.task_type} - <span class="priority-${t.priority}">${t.priority}</span></span></div><span class="tag is-warning is-light">${t.status}</span></div>
+                `).join('') : '<p class="has-text-grey">No hay tareas pendientes</p>';
+                // Recent cases
+                const cases = await (await fetch('/api/cases/list')).json();
+                document.getElementById('dashboard-recent-cases').innerHTML = cases.slice(0,5).map(c => `
+                    <div class="file-item" style="cursor:pointer" onclick="openCaseDetail('${c.id}')">
+                        <div><strong>${c.name}</strong><br><span class="is-size-7 has-text-grey">${c.case_type}</span></div>
+                        <span class="tag ${c.status==='abierto'?'is-success':c.status==='en_progreso'?'is-warning':'is-light'} is-light">${c.status}</span>
+                    </div>
+                `).join('') || '<p class="has-text-grey">No hay casos</p>';
+            } catch(e) { console.error('Dashboard error:', e); }
+        }
+
+        // ==================== Cases List ====================
+        async function loadCasesList(status) {
+            try {
+                const url = status ? `/api/cases/list?status=${status}` : '/api/cases/list';
+                const cases = await (await fetch(url)).json();
+                document.getElementById('cases-list-container').innerHTML = cases.length ? cases.map(c => `
+                    <div class="box case-card status-${c.status}" onclick="openCaseDetail('${c.id}')">
+                        <div class="level">
+                            <div class="level-left">
+                                <div>
+                                    <p class="title is-5 mb-1">${c.name}</p>
+                                    <p class="is-size-7 has-text-grey mb-2">${c.description || ''}</p>
+                                    <div>
+                                        <span class="tag ${c.status==='abierto'?'is-success':c.status==='en_progreso'?'is-warning':'is-light'} is-light">${c.status}</span>
+                                        <span class="tag is-info is-light">${c.case_type}</span>
+                                        ${(c.tags||[]).map(t => `<span class="tag is-light">${t}</span>`).join('')}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="level-right">
+                                <div class="buttons">
+                                    <button class="button is-small is-info" onclick="event.stopPropagation(); editCase('${c.id}')"><i class="fas fa-edit"></i></button>
+                                    ${c.status !== 'archivado' ? `<button class="button is-small is-warning" onclick="event.stopPropagation(); archiveCase('${c.id}')"><i class="fas fa-archive"></i></button>` : `<button class="button is-small is-success" onclick="event.stopPropagation(); unarchiveCase('${c.id}')"><i class="fas fa-box-open"></i></button>`}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `).join('') : '<div class="has-text-centered has-text-grey" style="padding:3rem"><i class="fas fa-briefcase" style="font-size:3rem;opacity:0.3"></i><p class="mt-3">No hay casos. Crea uno nuevo para comenzar.</p></div>';
+            } catch(e) { console.error('Cases list error:', e); }
+        }
+
+        function filterCases(status) { currentCaseFilter = status; loadCasesList(status); }
+
+        function showCreateCaseModal() {
+            document.getElementById('modal-case-title').textContent = 'Nuevo Caso';
+            document.getElementById('case-edit-id').value = '';
+            document.getElementById('case-name').value = '';
+            document.getElementById('case-description').value = '';
+            document.getElementById('case-type').value = 'investigacion';
+            document.getElementById('case-tags').value = '';
+            document.getElementById('modal-case').classList.add('is-active');
+        }
+        function closeCaseModal() { document.getElementById('modal-case').classList.remove('is-active'); }
+
+        async function editCase(id) {
+            const c = await (await fetch(`/api/cases/${id}`)).json();
+            document.getElementById('modal-case-title').textContent = 'Editar Caso';
+            document.getElementById('case-edit-id').value = id;
+            document.getElementById('case-name').value = c.name;
+            document.getElementById('case-description').value = c.description;
+            document.getElementById('case-type').value = c.case_type;
+            document.getElementById('case-tags').value = (c.tags||[]).join(', ');
+            document.getElementById('modal-case').classList.add('is-active');
+        }
+
+        async function saveCase() {
+            const editId = document.getElementById('case-edit-id').value;
+            const data = {
+                name: document.getElementById('case-name').value,
+                description: document.getElementById('case-description').value,
+                case_type: document.getElementById('case-type').value,
+                tags: document.getElementById('case-tags').value.split(',').map(t => t.trim()).filter(Boolean),
+            };
+            if (editId) {
+                await fetch(`/api/cases/${editId}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+            } else {
+                await fetch('/api/cases/', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+            }
+            closeCaseModal();
+            loadCasesList(currentCaseFilter);
+        }
+
+        async function archiveCase(id) { if(confirm('\u00bfArchivar este caso?')) { await fetch(`/api/cases/${id}/archive`, {method:'POST'}); loadCasesList(currentCaseFilter); } }
+        async function unarchiveCase(id) { await fetch(`/api/cases/${id}/unarchive`, {method:'POST'}); loadCasesList(currentCaseFilter); }
+
+        // ==================== Case Detail ====================
+        async function openCaseDetail(caseId) {
+            currentCaseId = caseId;
+            currentCaseData = await (await fetch(`/api/cases/${caseId}`)).json();
+            document.getElementById('case-detail-title').textContent = currentCaseData.name;
+            document.getElementById('modal-case-detail').classList.add('is-active');
+            // Tab switching within case detail
+            document.querySelectorAll('#case-detail-tabs li').forEach(li => {
+                li.classList.remove('is-active');
+                li.onclick = () => {
+                    document.querySelectorAll('#case-detail-tabs li').forEach(l => l.classList.remove('is-active'));
+                    li.classList.add('is-active');
+                    renderCaseTab(li.dataset.caseTab);
+                };
+            });
+            document.querySelector('#case-detail-tabs li[data-case-tab="info"]').classList.add('is-active');
+            renderCaseTab('info');
+        }
+        function closeCaseDetailModal() { document.getElementById('modal-case-detail').classList.remove('is-active'); currentCaseId = null; }
+
+        async function renderCaseTab(tab) {
+            const container = document.getElementById('case-detail-content');
+            const c = currentCaseData;
+            if (tab === 'info') {
+                container.innerHTML = `
+                    <div class="columns"><div class="column is-6">
+                        <p><strong>Tipo:</strong> ${c.case_type}</p>
+                        <p><strong>Estado:</strong> <span class="tag ${c.status==='abierto'?'is-success':c.status==='en_progreso'?'is-warning':'is-light'} is-light">${c.status}</span></p>
+                        <p><strong>Creado:</strong> ${new Date(c.created_at).toLocaleString()}</p>
+                        <p><strong>Actualizado:</strong> ${new Date(c.updated_at).toLocaleString()}</p>
+                    </div><div class="column is-6">
+                        <p><strong>Descripci\u00f3n:</strong></p><p>${c.description || 'Sin descripci\u00f3n'}</p>
+                        <p class="mt-2"><strong>Etiquetas:</strong> ${(c.tags||[]).map(t => `<span class="tag is-light">${t}</span>`).join(' ') || 'Ninguna'}</p>
+                    </div></div>
+                `;
+            } else if (tab === 'tasks') {
+                const tasks = await (await fetch(`/api/cases/tasks/list?case_id=${currentCaseId}`)).json();
+                container.innerHTML = `
+                    <button class="button is-primary is-small mb-3" onclick="showCreateTaskModal()">
+                        <i class="fas fa-plus mr-1"></i>Nueva Tarea
+                    </button>
+                    ${tasks.length ? tasks.map(t => `
+                        <div class="box" style="padding:0.75rem;border-left:4px solid ${t.priority==='alta'?'#f14668':t.priority==='media'?'#ffdd57':'#48c774'}">
+                            <div class="level mb-0">
+                                <div class="level-left">
+                                    <div>
+                                        <strong>${t.name}</strong>
+                                        <span class="tag is-small ${t.status==='completada'?'is-success':t.status==='en_progreso'?'is-warning':'is-light'} is-light ml-2">${t.status}</span>
+                                        <span class="tag is-small is-info is-light ml-1">${t.task_type}</span>
+                                        ${t.workflow_steps && t.workflow_steps.length ? `<span class="tag is-small is-link is-light ml-1">${t.workflow_steps.length} pasos</span>` : ''}
+                                        <br><span class="is-size-7 has-text-grey">${t.description || ''}</span>
+                                    </div>
+                                </div>
+                                <div class="level-right">
+                                    <div class="buttons are-small">
+                                        ${t.status==='pendiente'?`<button class="button is-warning" onclick="updateTaskStatus('${t.id}','en_progreso')"><i class="fas fa-play"></i></button>`:''}
+                                        ${t.status==='en_progreso'?`<button class="button is-success" onclick="updateTaskStatus('${t.id}','completada')"><i class="fas fa-check"></i></button>`:''}
+                                        <button class="button is-danger" onclick="deleteTask('${t.id}')"><i class="fas fa-trash"></i></button>
+                                    </div>
+                                </div>
+                            </div>
+                            ${t.workflow_steps && t.workflow_steps.length ? `<div class="mt-2" style="font-size:0.8rem">${t.workflow_steps.map((ws,i) => `<span class="skill-tag"><i class="fas fa-arrow-right mr-1"></i>${ws.name}</span>`).join(' ')}</div>` : ''}
+                        </div>
+                    `).join('') : '<p class="has-text-grey">No hay tareas. Crea una nueva.</p>'}
+                `;
+            } else if (tab === 'files') {
+                const folders = await (await fetch(`/api/cases/folders/${currentCaseId}`)).json();
+                const files = await (await fetch(`/api/cases/files/${currentCaseId}`)).json();
+                container.innerHTML = `
+                    <div class="columns"><div class="column is-4">
+                        <div class="card"><header class="card-header"><p class="card-header-title is-size-7"><i class="fas fa-folder mr-2"></i>Carpetas</p></header>
+                        <div class="card-content" style="padding:0.5rem">
+                            ${folders.map(f => `<div class="folder-tree-item" onclick="loadFolderFiles('${f.id}','${f.name}')"><i class="fas fa-folder" style="color:#ffdd57"></i> ${f.name} <span class="tag is-small is-light">${f.folder_type}</span></div>`).join('')}
+                            <button class="button is-small is-info mt-2" onclick="createFolder()"><i class="fas fa-plus mr-1"></i>Nueva Carpeta</button>
+                        </div></div>
+                    </div><div class="column is-8">
+                        <div class="card"><header class="card-header"><p class="card-header-title is-size-7" id="files-folder-title"><i class="fas fa-file mr-2"></i>Archivos</p></header>
+                        <div class="card-content" id="files-list-container">
+                            ${files.length ? files.map(f => `<div class="file-item"><div><i class="fas fa-file mr-2"></i>${f.original_name}<br><span class="is-size-7 has-text-grey">${(f.file_size/1024).toFixed(1)} KB</span></div><button class="button is-small is-danger" onclick="deleteFile('${f.id}')"><i class="fas fa-trash"></i></button></div>`).join('') : '<p class="has-text-grey">No hay archivos</p>'}
+                        </div></div>
+                        <div class="mt-3"><form id="file-upload-form" enctype="multipart/form-data">
+                            <div class="file has-name is-fullwidth"><label class="file-label">
+                                <input class="file-input" type="file" id="case-file-input" onchange="uploadCaseFile()">
+                                <span class="file-cta"><span class="file-icon"><i class="fas fa-upload"></i></span><span class="file-label">Subir archivo</span></span>
+                            </label></div>
+                        </form></div>
+                    </div></div>
+                `;
+            } else if (tab === 'evidence') {
+                const reqs = await (await fetch(`/api/cases/evidence/${currentCaseId}`)).json();
+                container.innerHTML = `
+                    <div class="columns"><div class="column is-7">
+                        <div id="evidence-map-container" class="evidence-map"></div>
+                        <div class="field mt-3">
+                            <label class="label is-small">Descripci\u00f3n de la solicitud</label>
+                            <input class="input is-small" id="evidence-description" placeholder="Ej: C\u00e1maras en radio de 500m del punto">
+                        </div>
+                        <button class="button is-primary is-small" onclick="submitEvidenceRequest()">
+                            <i class="fas fa-map-marker-alt mr-1"></i>Crear Solicitud de Evidencia
+                        </button>
+                    </div><div class="column is-5">
+                        <h5 class="title is-6">Solicitudes de Evidencias</h5>
+                        ${reqs.length ? reqs.map(r => `
+                            <div class="box" style="padding:0.75rem">
+                                <p><strong>${r.description}</strong></p>
+                                <p class="is-size-7">Lat: ${r.center_lat.toFixed(4)}, Lng: ${r.center_lng.toFixed(4)}</p>
+                                <span class="tag ${r.status==='completada'?'is-success':r.status==='procesando'?'is-warning':'is-light'} is-light">${r.status}</span>
+                            </div>
+                        `).join('') : '<p class="has-text-grey">No hay solicitudes de evidencias</p>'}
+                    </div></div>
+                `;
+                // Initialize map
+                setTimeout(() => initEvidenceMap(), 200);
+            } else if (tab === 'audit') {
+                container.innerHTML = `
+                    <table class="table is-fullwidth is-striped is-size-7">
+                        <thead><tr><th>Acci\u00f3n</th><th>Por</th><th>Fecha</th><th>Detalles</th></tr></thead>
+                        <tbody>${(c.audit_log||[]).reverse().map(a => `<tr><td><span class="tag is-light">${a.action}</span></td><td>${a.by||'admin'}</td><td>${new Date(a.at).toLocaleString()}</td><td>${(a.changes||[]).join(', ')||'-'}</td></tr>`).join('')}</tbody>
+                    </table>
+                `;
+            }
+        }
+
+        async function updateTaskStatus(taskId, status) {
+            await fetch(`/api/cases/tasks/${taskId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({status}) });
+            renderCaseTab('tasks');
+        }
+        async function deleteTask(taskId) {
+            if(confirm('\u00bfEliminar esta tarea?')) { await fetch(`/api/cases/tasks/${taskId}`, {method:'DELETE'}); renderCaseTab('tasks'); }
+        }
+
+        // ==================== Tasks ====================
+        function showCreateTaskModal() {
+            document.getElementById('modal-task-title').textContent = 'Nueva Tarea';
+            document.getElementById('task-edit-id').value = '';
+            document.getElementById('task-case-id').value = currentCaseId;
+            document.getElementById('task-name').value = '';
+            document.getElementById('task-description').value = '';
+            document.getElementById('task-type').value = 'humana';
+            document.querySelectorAll('#task-type-buttons button').forEach(b => b.classList.toggle('is-primary', b.dataset.type === 'humana'));
+            document.getElementById('task-priority').value = 'media';
+            document.getElementById('task-recurring').checked = false;
+            taskWorkflowSteps = [];
+            toggleTaskWorkflow();
+            toggleRecurrence();
+            loadAgentSelectOptions();
+            document.getElementById('modal-task').classList.add('is-active');
+        }
+        function closeTaskModal() { document.getElementById('modal-task').classList.remove('is-active'); }
+
+        function setTaskType(type) {
+            document.getElementById('task-type').value = type;
+            document.querySelectorAll('#task-type-buttons button').forEach(b => {
+                b.classList.toggle('is-primary', b.dataset.type === type);
+            });
+            toggleTaskWorkflow();
+        }
+
+        function toggleTaskWorkflow() {
+            const type = document.getElementById('task-type').value;
+            console.log('toggleTaskWorkflow called, type:', type);
+            const wfSection = document.getElementById('task-workflow-section');
+            const agentField = document.getElementById('task-agent-field');
+            if (wfSection) wfSection.style.display = (type === 'workflow') ? 'block' : 'none';
+            if (agentField) agentField.style.display = (type === 'agente' || type === 'workflow') ? 'block' : 'none';
+            if (type === 'workflow') renderTaskWorkflowSteps();
+        }
+        // Ensure the select change event fires properly
+        document.addEventListener('DOMContentLoaded', function() {
+            const taskTypeSelect = document.getElementById('task-type');
+            if (taskTypeSelect) {
+                taskTypeSelect.addEventListener('change', toggleTaskWorkflow);
+                taskTypeSelect.addEventListener('input', toggleTaskWorkflow);
+            }
+        });
+
+        function toggleRecurrence() {
+            const checked = document.getElementById('task-recurring').checked;
+            document.getElementById('task-recurrence-pattern-field').style.display = checked ? 'block' : 'none';
+            document.getElementById('task-recurrence-time-field').style.display = checked ? 'block' : 'none';
+        }
+
+        async function loadAgentSelectOptions() {
+            if (!casesAgentsCache.length) casesAgentsCache = await (await fetch('/api/cases/agents')).json();
+            if (!casesSkillsCache.length) casesSkillsCache = await (await fetch('/api/cases/skills')).json();
+            const sel = document.getElementById('task-agent-id');
+            sel.innerHTML = '<option value="">Sin agente</option>' + casesAgentsCache.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+        }
+
+        function addTaskWorkflowStep() {
+            taskWorkflowSteps.push({name:'', order: taskWorkflowSteps.length, agent_id:'', skill_ids:[], prompt:'', llm_config_name:'', use_previous_output:true, estimated_duration_min:5});
+            renderTaskWorkflowSteps();
+        }
+
+        function removeTaskWorkflowStep(idx) {
+            taskWorkflowSteps.splice(idx, 1);
+            taskWorkflowSteps.forEach((s,i) => s.order = i);
+            renderTaskWorkflowSteps();
+        }
+
+        function updateTaskWorkflowStep(idx, field, value) {
+            if (field === 'skill_ids') {
+                const sel = document.getElementById(`wf-step-skills-${idx}`);
+                value = Array.from(sel.selectedOptions).map(o => o.value);
+            }
+            taskWorkflowSteps[idx][field] = value;
+        }
+
+        function renderTaskWorkflowSteps() {
+            const container = document.getElementById('task-workflow-steps');
+            container.innerHTML = taskWorkflowSteps.map((step, i) => `
+                <div class="workflow-step-card">
+                    <div class="step-number">${i+1}</div>
+                    <div class="level mb-2" style="margin-left:1.5rem">
+                        <div class="level-left"><strong class="is-size-7">Paso ${i+1}</strong></div>
+                        <div class="level-right"><button class="button is-small is-danger" onclick="removeTaskWorkflowStep(${i})"><i class="fas fa-times"></i></button></div>
+                    </div>
+                    <div class="field"><input class="input is-small" placeholder="Nombre del paso" value="${step.name}" onchange="updateTaskWorkflowStep(${i},'name',this.value)"></div>
+                    <div class="columns">
+                        <div class="column is-6">
+                            <div class="field"><label class="label is-small">Agente</label>
+                                <div class="select is-small is-fullwidth">
+                                    <select onchange="updateTaskWorkflowStep(${i},'agent_id',this.value)">
+                                        <option value="">Sin agente</option>
+                                        ${casesAgentsCache.map(a => `<option value="${a.id}" ${step.agent_id===a.id?'selected':''}>${a.name}</option>`).join('')}
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="column is-6">
+                            <div class="field"><label class="label is-small">Skills</label>
+                                <div class="select is-small is-multiple is-fullwidth">
+                                    <select id="wf-step-skills-${i}" multiple size="3" onchange="updateTaskWorkflowStep(${i},'skill_ids')">
+                                        ${casesSkillsCache.map(s => `<option value="${s.id}" ${(step.skill_ids||[]).includes(s.id)?'selected':''}>${s.name}</option>`).join('')}
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="field"><label class="label is-small">Prompt espec\u00edfico</label>
+                        <textarea class="textarea is-small" rows="3" placeholder="Instrucciones espec\u00edficas para este paso..." onchange="updateTaskWorkflowStep(${i},'prompt',this.value)">${step.prompt||''}</textarea>
+                        <p class="help">Este prompt se combinar\u00e1 con el agent.md y los skills seleccionados</p>
+                    </div>
+                    <div class="columns">
+                        <div class="column is-6"><label class="checkbox is-size-7"><input type="checkbox" ${step.use_previous_output?'checked':''} onchange="updateTaskWorkflowStep(${i},'use_previous_output',this.checked)"> Usar salida del paso anterior</label></div>
+                        <div class="column is-6"><div class="field"><label class="label is-small">Duraci\u00f3n est. (min)</label><input class="input is-small" type="number" value="${step.estimated_duration_min||5}" onchange="updateTaskWorkflowStep(${i},'estimated_duration_min',parseInt(this.value))"></div></div>
+                    </div>
+                </div>
+                ${i < taskWorkflowSteps.length - 1 ? '<div class="workflow-connector"></div>' : ''}
+            `).join('');
+        }
+
+        async function saveTask() {
+            const data = {
+                case_id: document.getElementById('task-case-id').value,
+                name: document.getElementById('task-name').value,
+                description: document.getElementById('task-description').value,
+                task_type: document.getElementById('task-type').value,
+                priority: document.getElementById('task-priority').value,
+                agent_id: document.getElementById('task-agent-id').value || null,
+                workflow_steps: taskWorkflowSteps,
+                is_recurring: document.getElementById('task-recurring').checked,
+                recurrence_pattern: document.getElementById('task-recurring').checked ? document.getElementById('task-recurrence-pattern').value : null,
+                recurrence_time: document.getElementById('task-recurring').checked ? document.getElementById('task-recurrence-time').value : null,
+            };
+            const editId = document.getElementById('task-edit-id').value;
+            if (editId) {
+                await fetch(`/api/cases/tasks/${editId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+            } else {
+                await fetch('/api/cases/tasks', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+            }
+            closeTaskModal();
+            renderCaseTab('tasks');
+        }
+
+        // ==================== Files ====================
+        async function loadFolderFiles(folderId, folderName) {
+            document.getElementById('files-folder-title').innerHTML = `<i class="fas fa-folder-open mr-2"></i>${folderName}`;
+            const files = await (await fetch(`/api/cases/files/${currentCaseId}?folder_id=${folderId}`)).json();
+            document.getElementById('files-list-container').innerHTML = files.length ? files.map(f => `
+                <div class="file-item"><div><i class="fas fa-file mr-2"></i>${f.original_name}<br><span class="is-size-7 has-text-grey">${(f.file_size/1024).toFixed(1)} KB</span></div><button class="button is-small is-danger" onclick="deleteFile('${f.id}')"><i class="fas fa-trash"></i></button></div>
+            `).join('') : '<p class="has-text-grey">No hay archivos en esta carpeta</p>';
+            // Store current folder for upload
+            document.getElementById('case-file-input').dataset.folderId = folderId;
+        }
+
+        async function uploadCaseFile() {
+            const input = document.getElementById('case-file-input');
+            if (!input.files.length) return;
+            const folderId = input.dataset.folderId;
+            if (!folderId) { alert('Selecciona una carpeta primero'); return; }
+            const formData = new FormData();
+            formData.append('file', input.files[0]);
+            formData.append('case_id', currentCaseId);
+            formData.append('folder_id', folderId);
+            await fetch('/api/cases/files/upload', { method: 'POST', body: formData });
+            input.value = '';
+            renderCaseTab('files');
+        }
+
+        async function deleteFile(fileId) {
+            if(confirm('\u00bfEliminar este archivo?')) { await fetch(`/api/cases/files/${fileId}`, {method:'DELETE'}); renderCaseTab('files'); }
+        }
+
+        async function createFolder() {
+            const name = prompt('Nombre de la carpeta:');
+            if (!name) return;
+            await fetch('/api/cases/folders', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({case_id: currentCaseId, name}) });
+            renderCaseTab('files');
+        }
+
+        // ==================== Evidence Map ====================
+        function initEvidenceMap() {
+            const mapContainer = document.getElementById('evidence-map-container');
+            if (!mapContainer) return;
+            if (evidenceMap) { evidenceMap.remove(); evidenceMap = null; }
+            evidenceMap = L.map('evidence-map-container').setView([-33.4489, -70.6693], 13);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '\u00a9 OpenStreetMap' }).addTo(evidenceMap);
+            const drawnItems = new L.FeatureGroup();
+            evidenceMap.addLayer(drawnItems);
+            const drawControl = new L.Control.Draw({
+                edit: { featureGroup: drawnItems },
+                draw: { polygon: true, rectangle: true, circle: true, marker: true, polyline: false, circlemarker: false }
+            });
+            evidenceMap.addControl(drawControl);
+            evidenceMap.on(L.Draw.Event.CREATED, function(e) {
+                drawnItems.clearLayers();
+                drawnItems.addLayer(e.layer);
+                drawnPolygon = e.layer;
+            });
+        }
+
+        async function submitEvidenceRequest() {
+            const desc = document.getElementById('evidence-description').value;
+            if (!desc) { alert('Ingresa una descripci\u00f3n'); return; }
+            let coords = [], lat = 0, lng = 0, radius = 0;
+            if (drawnPolygon) {
+                if (drawnPolygon.getLatLng) {
+                    const ll = drawnPolygon.getLatLng();
+                    lat = ll.lat; lng = ll.lng;
+                    radius = drawnPolygon.getRadius ? drawnPolygon.getRadius() : 500;
+                } else if (drawnPolygon.getLatLngs) {
+                    const lls = drawnPolygon.getLatLngs()[0] || drawnPolygon.getLatLngs();
+                    coords = lls.map(ll => ({lat: ll.lat, lng: ll.lng}));
+                    const center = drawnPolygon.getBounds().getCenter();
+                    lat = center.lat; lng = center.lng;
+                }
+            }
+            await fetch('/api/cases/evidence', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+                case_id: currentCaseId, description: desc, polygon_coords: coords, center_lat: lat, center_lng: lng, radius_m: radius
+            })});
+            renderCaseTab('evidence');
+        }
+
+        // ==================== Agent Definitions ====================
+        async function loadAgentDefinitions() {
+            casesAgentsCache = await (await fetch('/api/cases/agents')).json();
+            const grid = document.getElementById('agents-grid');
+            grid.innerHTML = casesAgentsCache.map(a => `
+                <div class="agent-def-card" style="border-left-color:${a.color}">
+                    <div class="level mb-2">
+                        <div class="level-left"><span style="font-size:1.5rem;color:${a.color}"><i class="${a.icon}"></i></span><strong class="ml-2">${a.name}</strong></div>
+                        <div class="level-right">
+                            <button class="button is-small is-info" onclick="editAgentDef('${a.id}')"><i class="fas fa-edit"></i></button>
+                            ${!a.is_default ? `<button class="button is-small is-danger ml-1" onclick="deleteAgentDef('${a.id}')"><i class="fas fa-trash"></i></button>` : ''}
+                        </div>
+                    </div>
+                    <p class="is-size-7 mb-2">${a.description}</p>
+                    <div><span class="tag is-info is-light">${a.category}</span>
+                    ${(a.skills||[]).map(sid => { const sk = casesSkillsCache.find(s => s.id === sid); return sk ? `<span class="skill-tag"><i class="${sk.icon}"></i>${sk.name}</span>` : ''; }).join('')}
+                    </div>
+                </div>
+            `).join('') || '<p class="has-text-grey">No hay agentes definidos</p>';
+        }
+
+        function showCreateAgentModal() {
+            document.getElementById('modal-agent-title').textContent = 'Nuevo Agente';
+            document.getElementById('agent-edit-id').value = '';
+            document.getElementById('agent-name').value = '';
+            document.getElementById('agent-description').value = '';
+            document.getElementById('agent-category').value = '';
+            document.getElementById('agent-icon').value = 'fas fa-robot';
+            document.getElementById('agent-color').value = '#4361ee';
+            document.getElementById('agent-system-prompt').value = '';
+            document.getElementById('agent-md').value = '';
+            loadAgentSkillsSelector([]);
+            document.getElementById('modal-agent').classList.add('is-active');
+        }
+        function closeAgentModal() { document.getElementById('modal-agent').classList.remove('is-active'); }
+
+        async function editAgentDef(id) {
+            const a = await (await fetch(`/api/cases/agents/${id}`)).json();
+            document.getElementById('modal-agent-title').textContent = 'Editar Agente';
+            document.getElementById('agent-edit-id').value = id;
+            document.getElementById('agent-name').value = a.name;
+            document.getElementById('agent-description').value = a.description;
+            document.getElementById('agent-category').value = a.category;
+            document.getElementById('agent-icon').value = a.icon;
+            document.getElementById('agent-color').value = a.color;
+            document.getElementById('agent-system-prompt').value = a.system_prompt;
+            document.getElementById('agent-md').value = a.agent_md;
+            loadAgentSkillsSelector(a.skills || []);
+            document.getElementById('modal-agent').classList.add('is-active');
+        }
+
+        function loadAgentSkillsSelector(selectedIds) {
+            const container = document.getElementById('agent-skills-selector');
+            container.innerHTML = casesSkillsCache.map(s => `
+                <label class="checkbox" style="display:block;margin-bottom:0.25rem">
+                    <input type="checkbox" value="${s.id}" ${selectedIds.includes(s.id)?'checked':''}>
+                    <i class="${s.icon} ml-1" style="color:${s.color}"></i> ${s.name}
+                </label>
+            `).join('');
+        }
+
+        async function saveAgent() {
+            const editId = document.getElementById('agent-edit-id').value;
+            const skillCheckboxes = document.querySelectorAll('#agent-skills-selector input[type=checkbox]:checked');
+            const data = {
+                name: document.getElementById('agent-name').value,
+                description: document.getElementById('agent-description').value,
+                category: document.getElementById('agent-category').value,
+                icon: document.getElementById('agent-icon').value,
+                color: document.getElementById('agent-color').value,
+                system_prompt: document.getElementById('agent-system-prompt').value,
+                agent_md: document.getElementById('agent-md').value,
+                skills: Array.from(skillCheckboxes).map(cb => cb.value),
+            };
+            if (editId) {
+                await fetch(`/api/cases/agents/${editId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+            } else {
+                await fetch('/api/cases/agents', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+            }
+            closeAgentModal();
+            loadAgentDefinitions();
+        }
+
+        async function deleteAgentDef(id) {
+            if(confirm('\u00bfEliminar este agente?')) { await fetch(`/api/cases/agents/${id}`, {method:'DELETE'}); loadAgentDefinitions(); }
+        }
+
+        // ==================== Skill Definitions ====================
+        async function loadSkillDefinitions() {
+            casesSkillsCache = await (await fetch('/api/cases/skills')).json();
+            // Category filters
+            const categories = [...new Set(casesSkillsCache.map(s => s.category))];
+            document.getElementById('skill-category-filters').innerHTML = `
+                <button class="button is-small" onclick="filterSkills('')">Todos</button>
+                ${categories.map(c => `<button class="button is-small" onclick="filterSkills('${c}')">${c}</button>`).join('')}
+            `;
+            renderSkillsGrid(casesSkillsCache);
+        }
+
+        function filterSkills(category) {
+            const filtered = category ? casesSkillsCache.filter(s => s.category === category) : casesSkillsCache;
+            renderSkillsGrid(filtered);
+        }
+
+        function renderSkillsGrid(skills) {
+            document.getElementById('skills-grid').innerHTML = skills.map(s => `
+                <div class="skill-def-card" style="border-left-color:${s.color}">
+                    <div class="level mb-2">
+                        <div class="level-left"><span style="font-size:1.5rem;color:${s.color}"><i class="${s.icon}"></i></span><strong class="ml-2">${s.name}</strong></div>
+                        <div class="level-right">
+                            <button class="button is-small is-info" onclick="editSkillDef('${s.id}')"><i class="fas fa-edit"></i></button>
+                            ${!s.is_default ? `<button class="button is-small is-danger ml-1" onclick="deleteSkillDef('${s.id}')"><i class="fas fa-trash"></i></button>` : ''}
+                        </div>
+                    </div>
+                    <p class="is-size-7 mb-2">${s.description}</p>
+                    <div><span class="tag is-link is-light">${s.category}</span></div>
+                </div>
+            `).join('') || '<p class="has-text-grey">No hay skills definidos</p>';
+        }
+
+        function showCreateSkillModal() {
+            document.getElementById('modal-skill-title').textContent = 'Nuevo Skill';
+            document.getElementById('skill-edit-id').value = '';
+            document.getElementById('skill-name').value = '';
+            document.getElementById('skill-description').value = '';
+            document.getElementById('skill-category').value = 'general';
+            document.getElementById('skill-icon').value = 'fas fa-cog';
+            document.getElementById('skill-color').value = '#4361ee';
+            document.getElementById('skill-license').value = '';
+            document.getElementById('skill-md').value = '';
+            document.getElementById('modal-skill').classList.add('is-active');
+        }
+        function closeSkillModal() { document.getElementById('modal-skill').classList.remove('is-active'); }
+
+        async function editSkillDef(id) {
+            const s = await (await fetch(`/api/cases/skills/${id}`)).json();
+            document.getElementById('modal-skill-title').textContent = 'Editar Skill';
+            document.getElementById('skill-edit-id').value = id;
+            document.getElementById('skill-name').value = s.name;
+            document.getElementById('skill-description').value = s.description;
+            document.getElementById('skill-category').value = s.category;
+            document.getElementById('skill-icon').value = s.icon;
+            document.getElementById('skill-color').value = s.color;
+            document.getElementById('skill-license').value = s.license || '';
+            document.getElementById('skill-md').value = s.skill_md;
+            document.getElementById('modal-skill').classList.add('is-active');
+        }
+
+        async function saveSkill() {
+            const editId = document.getElementById('skill-edit-id').value;
+            const data = {
+                name: document.getElementById('skill-name').value,
+                description: document.getElementById('skill-description').value,
+                category: document.getElementById('skill-category').value,
+                icon: document.getElementById('skill-icon').value,
+                color: document.getElementById('skill-color').value,
+                license: document.getElementById('skill-license').value,
+                skill_md: document.getElementById('skill-md').value,
+            };
+            if (editId) {
+                await fetch(`/api/cases/skills/${editId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+            } else {
+                await fetch('/api/cases/skills', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+            }
+            closeSkillModal();
+            loadSkillDefinitions();
+        }
+
+        async function deleteSkillDef(id) {
+            if(confirm('\u00bfEliminar este skill?')) { await fetch(`/api/cases/skills/${id}`, {method:'DELETE'}); loadSkillDefinitions(); }
+        }
+
+        // ==================== Pipeline Steps: Agent/Skills Enhancement ====================
+        async function ensureCasesCache() {
+            if (!casesAgentsCache.length) casesAgentsCache = await (await fetch('/api/cases/agents')).json();
+            if (!casesSkillsCache.length) casesSkillsCache = await (await fetch('/api/cases/skills')).json();
+        }
 
         // ==================== Init ====================
         loadConfigs();
