@@ -893,7 +893,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vision LLM Comparator</title>
+    <title>SITIA Portal</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Markdown rendering and syntax highlighting -->
@@ -908,39 +908,248 @@ HTML_TEMPLATE = """
     <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
     <style>
         :root {
+            --primary: #667eea;
+            --primary-dark: #5a6fd6;
             --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --sidebar-width: 260px;
+            --sidebar-collapsed: 64px;
+            --topbar-height: 56px;
+            --bg-dark: #1a1b2e;
+            --bg-sidebar: #1e1f36;
+            --bg-sidebar-hover: #2a2b48;
+            --bg-sidebar-active: rgba(102,126,234,0.15);
+            --text-sidebar: #a0a3bd;
+            --text-sidebar-active: #ffffff;
+            --text-category: #6c6f93;
         }
+        * { box-sizing: border-box; }
         body {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: #f0f2f5;
             min-height: 100vh;
+            margin: 0;
+            overflow-x: hidden;
         }
-        .navbar {
-            background: rgba(255,255,255,0.95);
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        /* ===== SIDEBAR ===== */
+        .app-sidebar {
+            position: fixed;
+            top: 0; left: 0;
+            width: var(--sidebar-width);
+            height: 100vh;
+            background: var(--bg-sidebar);
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            transition: width 0.3s cubic-bezier(0.4,0,0.2,1);
+            overflow: hidden;
+            box-shadow: 2px 0 12px rgba(0,0,0,0.15);
         }
-        .main-container {
-            padding: 2rem;
+        .app-sidebar.collapsed { width: var(--sidebar-collapsed); }
+        .sidebar-header {
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            height: var(--topbar-height);
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            flex-shrink: 0;
         }
-        .card {
-            border-radius: 12px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            margin-bottom: 1.5rem;
+        .sidebar-logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #fff;
+            font-weight: 700;
+            font-size: 1.05rem;
+            white-space: nowrap;
+            overflow: hidden;
         }
-        .card-header {
-            background: linear-gradient(135deg, #f5f7fa 0%, #e4e8eb 100%);
-            border-radius: 12px 12px 0 0;
+        .sidebar-logo i { font-size: 1.4rem; color: var(--primary); flex-shrink: 0; }
+        .sidebar-toggle {
+            margin-left: auto;
+            background: none;
+            border: none;
+            color: var(--text-sidebar);
+            cursor: pointer;
+            font-size: 1.1rem;
+            padding: 4px 6px;
+            border-radius: 6px;
+            transition: background 0.2s;
+            flex-shrink: 0;
         }
-        .tabs-container {
-            background: white;
-            border-radius: 12px;
-            padding: 1rem;
-            margin-bottom: 1.5rem;
+        .sidebar-toggle:hover { background: var(--bg-sidebar-hover); }
+        .app-sidebar.collapsed .sidebar-logo span,
+        .app-sidebar.collapsed .sidebar-category-label,
+        .app-sidebar.collapsed .sidebar-item-text,
+        .app-sidebar.collapsed .sidebar-badge { display: none; }
+        .app-sidebar.collapsed .sidebar-toggle { margin-left: 0; }
+        .app-sidebar.collapsed .sidebar-header { justify-content: center; padding: 0; }
+        .app-sidebar.collapsed .sidebar-item { justify-content: center; padding: 0 0; height: 44px; position: relative; }
+        .app-sidebar.collapsed .sidebar-item i { margin: 0; font-size: 1.15rem; }
+        .app-sidebar.collapsed .sidebar-item:hover::after {
+            content: attr(data-tooltip);
+            position: absolute;
+            left: calc(var(--sidebar-collapsed) + 6px);
+            top: 50%;
+            transform: translateY(-50%);
+            background: #363636;
+            color: #fff;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 0.78rem;
+            white-space: nowrap;
+            z-index: 200;
+            pointer-events: none;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
         }
+        .sidebar-nav {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 8px 0;
+        }
+        .sidebar-nav::-webkit-scrollbar { width: 4px; }
+        .sidebar-nav::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+        .sidebar-category {
+            padding: 0 12px;
+            margin-top: 16px;
+        }
+        .sidebar-category:first-child { margin-top: 8px; }
+        .sidebar-category-label {
+            font-size: 0.65rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            color: var(--text-category);
+            padding: 0 8px;
+            margin-bottom: 4px;
+            white-space: nowrap;
+        }
+        .sidebar-item {
+            display: flex;
+            align-items: center;
+            padding: 0 12px;
+            height: 40px;
+            border-radius: 8px;
+            color: var(--text-sidebar);
+            cursor: pointer;
+            transition: all 0.2s;
+            margin: 1px 0;
+            white-space: nowrap;
+            overflow: hidden;
+            user-select: none;
+            position: relative;
+        }
+        .sidebar-item:hover { background: var(--bg-sidebar-hover); color: #d0d3f0; }
+        .sidebar-item.active {
+            background: var(--bg-sidebar-active);
+            color: var(--text-sidebar-active);
+        }
+        .sidebar-item.active::before {
+            content: '';
+            position: absolute;
+            left: 0; top: 6px; bottom: 6px;
+            width: 3px;
+            border-radius: 0 3px 3px 0;
+            background: var(--primary);
+        }
+        .sidebar-item i {
+            width: 20px;
+            text-align: center;
+            margin-right: 12px;
+            font-size: 1rem;
+            flex-shrink: 0;
+        }
+        .sidebar-item-text { font-size: 0.88rem; font-weight: 500; }
+        .sidebar-badge {
+            margin-left: auto;
+            background: var(--primary);
+            color: #fff;
+            font-size: 0.65rem;
+            font-weight: 700;
+            padding: 2px 7px;
+            border-radius: 10px;
+            min-width: 20px;
+            text-align: center;
+        }
+        .sidebar-divider {
+            height: 1px;
+            background: rgba(255,255,255,0.06);
+            margin: 12px 16px;
+        }
+        .sidebar-footer {
+            padding: 12px 16px;
+            border-top: 1px solid rgba(255,255,255,0.06);
+            flex-shrink: 0;
+        }
+        .sidebar-footer-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-sidebar);
+            font-size: 0.8rem;
+        }
+        .sidebar-footer-info .avatar {
+            width: 32px; height: 32px;
+            border-radius: 50%;
+            background: var(--primary-gradient);
+            display: flex; align-items: center; justify-content: center;
+            color: #fff; font-weight: 700; font-size: 0.85rem;
+            flex-shrink: 0;
+        }
+        /* ===== TOPBAR ===== */
+        .app-topbar {
+            position: fixed;
+            top: 0;
+            left: var(--sidebar-width);
+            right: 0;
+            height: var(--topbar-height);
+            background: #fff;
+            border-bottom: 1px solid #e4e6eb;
+            display: flex;
+            align-items: center;
+            padding: 0 24px;
+            z-index: 90;
+            transition: left 0.3s cubic-bezier(0.4,0,0.2,1);
+        }
+        .app-sidebar.collapsed ~ .app-topbar { left: var(--sidebar-collapsed); }
+        .topbar-title {
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: #363636;
+        }
+        .topbar-title i { color: var(--primary); margin-right: 8px; }
+        .topbar-right {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        /* ===== MAIN CONTENT ===== */
+        .app-main {
+            margin-left: var(--sidebar-width);
+            margin-top: var(--topbar-height);
+            padding: 24px;
+            min-height: calc(100vh - var(--topbar-height));
+            transition: margin-left 0.3s cubic-bezier(0.4,0,0.2,1);
+        }
+        .app-sidebar.collapsed ~ .app-main { margin-left: var(--sidebar-collapsed); }
         .tab-content {
             display: none;
         }
         .tab-content.is-active {
             display: block;
+            animation: fadeIn 0.25s ease;
+        }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+        .card {
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            margin-bottom: 1.5rem;
+            border: 1px solid #e8eaed;
+        }
+        .card-header {
+            background: #fafbfc;
+            border-radius: 12px 12px 0 0;
+            border-bottom: 1px solid #e8eaed;
         }
         .step-card {
             background: #f8f9fa;
@@ -1097,12 +1306,14 @@ HTML_TEMPLATE = """
         .agent-image-caption { font-size: 0.8rem; color: #888; margin-top: 0.25rem; }
         .agent-msg-meta { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-size: 0.75rem; color: #999; }
         /* Cases Module Styles */
-        .cases-dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
-        .dash-stat { background: white; border-radius: 12px; padding: 1.25rem; text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,0.08); transition: transform 0.2s; }
-        .dash-stat:hover { transform: translateY(-3px); }
-        .dash-stat .stat-icon { font-size: 2rem; margin-bottom: 0.5rem; }
-        .dash-stat .stat-value { font-size: 2rem; font-weight: 700; }
-        .dash-stat .stat-label { font-size: 0.85rem; color: #666; margin-top: 0.25rem; }
+        .cases-dashboard-grid { display: grid !important; grid-template-columns: repeat(6, 1fr) !important; gap: 1rem !important; margin-bottom: 1.5rem; }
+        @media (max-width: 1200px) { .cases-dashboard-grid { grid-template-columns: repeat(3, 1fr); } }
+        @media (max-width: 768px) { .cases-dashboard-grid { grid-template-columns: repeat(2, 1fr); } }
+        .dash-stat { background: white; border-radius: 12px; padding: 1.25rem; text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,0.08); transition: transform 0.2s; border: 1px solid #e8eaed; }
+        .dash-stat:hover { transform: translateY(-3px); box-shadow: 0 6px 20px rgba(0,0,0,0.12); }
+        .dash-stat .stat-icon { font-size: 1.8rem; margin-bottom: 0.5rem; }
+        .dash-stat .stat-value { font-size: 2rem; font-weight: 700; color: #363636; }
+        .dash-stat .stat-label { font-size: 0.8rem; color: #888; margin-top: 0.25rem; text-transform: uppercase; letter-spacing: 0.5px; }
         .case-card { border-left: 4px solid #667eea; transition: all 0.3s; cursor: pointer; }
         .case-card:hover { transform: translateX(5px); box-shadow: 0 4px 20px rgba(0,0,0,0.12); }
         .case-card.status-abierto { border-left-color: #48c774; }
@@ -1126,67 +1337,114 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <nav class="navbar" role="navigation">
-        <div class="navbar-brand">
-            <a class="navbar-item" href="#">
-                <i class="fas fa-eye mr-2"></i>
-                <strong>Vision LLM Comparator</strong>
-            </a>
+    <!-- ===== SIDEBAR ===== -->
+    <aside class="app-sidebar" id="app-sidebar">
+        <div class="sidebar-header">
+            <div class="sidebar-logo">
+                <i class="fas fa-eye"></i>
+                <span>SITIA Portal</span>
+            </div>
+            <button class="sidebar-toggle" id="sidebar-toggle" title="Colapsar menú">
+                <i class="fas fa-bars"></i>
+            </button>
         </div>
-        <div class="navbar-end">
-            <div class="navbar-item">
-                <span class="counter-badge" id="execution-counter">
-                    <i class="fas fa-chart-line mr-1"></i>
-                    <span id="total-executions">0</span> ejecuciones
-                </span>
+        <nav class="sidebar-nav">
+            <!-- Análisis de Imágenes -->
+            <div class="sidebar-category">
+                <div class="sidebar-category-label">Análisis de Imágenes</div>
+                <div class="sidebar-item active" data-tab="execute" data-tooltip="Ejecutar">
+                    <i class="fas fa-play"></i>
+                    <span class="sidebar-item-text">Ejecutar</span>
+                </div>
+                <div class="sidebar-item" data-tab="pipelines" data-tooltip="Pipelines">
+                    <i class="fas fa-project-diagram"></i>
+                    <span class="sidebar-item-text">Pipelines</span>
+                </div>
+                <div class="sidebar-item" data-tab="history" data-tooltip="Historial">
+                    <i class="fas fa-history"></i>
+                    <span class="sidebar-item-text">Historial</span>
+                </div>
+                <div class="sidebar-item" data-tab="search" data-tooltip="Búsqueda">
+                    <i class="fas fa-search"></i>
+                    <span class="sidebar-item-text">Búsqueda</span>
+                </div>
+            </div>
+            <!-- Configuración -->
+            <div class="sidebar-category">
+                <div class="sidebar-category-label">Configuración</div>
+                <div class="sidebar-item" data-tab="configs" data-tooltip="Configuraciones LLM">
+                    <i class="fas fa-cog"></i>
+                    <span class="sidebar-item-text">Configuraciones LLM</span>
+                </div>
+                <div class="sidebar-item" data-tab="reviews" data-tooltip="Revisiones">
+                    <i class="fas fa-check-double"></i>
+                    <span class="sidebar-item-text">Revisiones</span>
+                </div>
+                <div class="sidebar-item" data-tab="statistics" data-tooltip="Estadísticas">
+                    <i class="fas fa-chart-bar"></i>
+                    <span class="sidebar-item-text">Estadísticas</span>
+                </div>
+            </div>
+            <!-- Agente -->
+            <div class="sidebar-category">
+                <div class="sidebar-category-label">Agente</div>
+                <div class="sidebar-item" data-tab="agent" data-tooltip="Agente Visual">
+                    <i class="fas fa-robot"></i>
+                    <span class="sidebar-item-text">Agente Visual</span>
+                </div>
+            </div>
+            <div class="sidebar-divider"></div>
+            <!-- Gestión de Casos -->
+            <div class="sidebar-category">
+                <div class="sidebar-category-label">Gestión de Casos</div>
+                <div class="sidebar-item" data-tab="cases-dashboard" data-tooltip="Dashboard">
+                    <i class="fas fa-tachometer-alt"></i>
+                    <span class="sidebar-item-text">Dashboard</span>
+                </div>
+                <div class="sidebar-item" data-tab="cases-list" data-tooltip="Casos">
+                    <i class="fas fa-briefcase"></i>
+                    <span class="sidebar-item-text">Casos</span>
+                </div>
+            </div>
+            <!-- Inteligencia -->
+            <div class="sidebar-category">
+                <div class="sidebar-category-label">Inteligencia</div>
+                <div class="sidebar-item" data-tab="cases-agents" data-tooltip="Agentes">
+                    <i class="fas fa-user-secret"></i>
+                    <span class="sidebar-item-text">Agentes</span>
+                </div>
+                <div class="sidebar-item" data-tab="cases-skills" data-tooltip="Skills">
+                    <i class="fas fa-puzzle-piece"></i>
+                    <span class="sidebar-item-text">Skills</span>
+                </div>
+            </div>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="sidebar-footer-info">
+                <div class="avatar">S</div>
+                <div style="overflow:hidden;">
+                    <div style="font-weight:600;color:#fff;font-size:0.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">SITIA</div>
+                    <div style="font-size:0.7rem;">v2.0</div>
+                </div>
             </div>
         </div>
-    </nav>
+    </aside>
 
-    <div class="main-container">
-        <div class="tabs-container">
-            <div class="tabs is-centered is-boxed">
-                <ul>
-                    <li class="is-active" data-tab="execute">
-                        <a><i class="fas fa-play mr-2"></i>Ejecutar</a>
-                    </li>
-                    <li data-tab="pipelines">
-                        <a><i class="fas fa-project-diagram mr-2"></i>Pipelines</a>
-                    </li>
-                    <li data-tab="configs">
-                        <a><i class="fas fa-cog mr-2"></i>Configuraciones LLM</a>
-                    </li>
-                    <li data-tab="history">
-                        <a><i class="fas fa-history mr-2"></i>Historial</a>
-                    </li>
-                    <li data-tab="reviews">
-                        <a><i class="fas fa-check-double mr-2"></i>Revisiones</a>
-                    </li>
-                    <li data-tab="statistics">
-                        <a><i class="fas fa-chart-bar mr-2"></i>Estadísticas</a>
-                    </li>
-                    <li data-tab="search">
-                        <a><i class="fas fa-search mr-2"></i>Búsqueda</a>
-                    </li>
-                    <li data-tab="agent">
-                        <a><i class="fas fa-robot mr-2"></i>Agente Visual</a>
-                    </li>
-                    <li data-tab="cases-dashboard" style="border-left: 2px solid #667eea; margin-left: 0.5rem; padding-left: 0.5rem;">
-                        <a><i class="fas fa-tachometer-alt mr-2"></i>Dashboard</a>
-                    </li>
-                    <li data-tab="cases-list">
-                        <a><i class="fas fa-briefcase mr-2"></i>Casos</a>
-                    </li>
-                    <li data-tab="cases-agents">
-                        <a><i class="fas fa-robot mr-2"></i>Agentes</a>
-                    </li>
-                    <li data-tab="cases-skills">
-                        <a><i class="fas fa-puzzle-piece mr-2"></i>Skills</a>
-                    </li>
-                </ul>
-            </div>
+    <!-- ===== TOPBAR ===== -->
+    <header class="app-topbar" id="app-topbar">
+        <div class="topbar-title" id="topbar-title">
+            <i class="fas fa-play"></i> Ejecutar
         </div>
+        <div class="topbar-right">
+            <span class="counter-badge" id="execution-counter" style="background:var(--primary-gradient);color:#fff;padding:6px 14px;border-radius:20px;font-size:0.85rem;font-weight:600;">
+                <i class="fas fa-chart-line mr-1"></i>
+                <span id="total-executions">0</span> ejecuciones
+            </span>
+        </div>
+    </header>
 
+    <!-- ===== MAIN CONTENT ===== -->
+    <main class="app-main" id="app-main">
         <!-- Tab: Ejecutar -->
         <div id="tab-execute" class="tab-content is-active">
             <div class="columns">
@@ -1854,7 +2112,7 @@ HTML_TEMPLATE = """
 
         <!-- Tab: Cases Dashboard -->
         <div id="tab-cases-dashboard" class="tab-content">
-            <div class="cases-dashboard-grid" id="dashboard-stats"></div>
+            <div class="cases-dashboard-grid" id="dashboard-stats" style="display:grid;grid-template-columns:repeat(6,1fr);gap:1rem"></div>
             <div class="columns">
                 <div class="column is-6">
                     <div class="card">
@@ -1920,7 +2178,7 @@ HTML_TEMPLATE = """
             <div id="skills-grid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(320px,1fr)); gap:1rem;"></div>
         </div>
 
-    </div>
+    </main>
 
     <!-- Modals -->
     <!-- Create/Edit Case Modal -->
@@ -2075,30 +2333,50 @@ HTML_TEMPLATE = """
         let batchSelectedImages = []; // Imágenes seleccionadas para batch
         let allImagesData = []; // Cache de todas las imágenes
 
-        // ==================== Tab Navigation ====================
-        document.querySelectorAll('.tabs.is-boxed li[data-tab]').forEach(tab => {
-            tab.addEventListener('click', () => {
-                const tabId = tab.dataset.tab;
-                if (!tabId) return; // Ignorar si no tiene data-tab
-                document.querySelectorAll('.tabs.is-boxed li[data-tab]').forEach(t => t.classList.remove('is-active'));
-                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('is-active'));
-                tab.classList.add('is-active');
-                document.getElementById('tab-' + tabId).classList.add('is-active');
-                
-                // Cargar datos según la pestaña
-                if (tabId === 'configs') loadConfigs();
-                if (tabId === 'pipelines') { loadConfigs(); loadPipelines(); }
-                if (tabId === 'execute') { loadImages(); loadPipelinesForExecution(); }
-                if (tabId === 'history') loadHistory();
-                if (tabId === 'reviews') { loadPendingReviews(); loadAccuracyMetrics(); }
-                if (tabId === 'statistics') loadStatistics();
-                if (tabId === 'search') loadSearchStats();
-                if (tabId === 'agent') { loadAgentSessions(); loadAgentImages(); loadAgentLLMs(); }
-                if (tabId === 'cases-dashboard') loadCasesDashboard();
-                if (tabId === 'cases-list') loadCasesList();
-                if (tabId === 'cases-agents') loadAgentDefinitions();
-                if (tabId === 'cases-skills') loadSkillDefinitions();
-            });
+        // ==================== Sidebar Navigation ====================
+        const sidebarTitleMap = {
+            'execute': '<i class="fas fa-play"></i> Ejecutar',
+            'pipelines': '<i class="fas fa-project-diagram"></i> Pipelines',
+            'configs': '<i class="fas fa-cog"></i> Configuraciones LLM',
+            'history': '<i class="fas fa-history"></i> Historial',
+            'reviews': '<i class="fas fa-check-double"></i> Revisiones',
+            'statistics': '<i class="fas fa-chart-bar"></i> Estad\u00edsticas',
+            'search': '<i class="fas fa-search"></i> B\u00fasqueda',
+            'agent': '<i class="fas fa-robot"></i> Agente Visual',
+            'cases-dashboard': '<i class="fas fa-tachometer-alt"></i> Dashboard',
+            'cases-list': '<i class="fas fa-briefcase"></i> Casos',
+            'cases-agents': '<i class="fas fa-user-secret"></i> Agentes',
+            'cases-skills': '<i class="fas fa-puzzle-piece"></i> Skills'
+        };
+        function switchTab(tabId) {
+            document.querySelectorAll('.sidebar-item[data-tab]').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('is-active'));
+            const sidebarItem = document.querySelector('.sidebar-item[data-tab="' + tabId + '"]');
+            if (sidebarItem) sidebarItem.classList.add('active');
+            const tabEl = document.getElementById('tab-' + tabId);
+            if (tabEl) tabEl.classList.add('is-active');
+            const topTitle = document.getElementById('topbar-title');
+            if (topTitle && sidebarTitleMap[tabId]) topTitle.innerHTML = sidebarTitleMap[tabId];
+            // Load data for the tab
+            if (tabId === 'configs') loadConfigs();
+            if (tabId === 'pipelines') { loadConfigs(); loadPipelines(); }
+            if (tabId === 'execute') { loadImages(); loadPipelinesForExecution(); }
+            if (tabId === 'history') loadHistory();
+            if (tabId === 'reviews') { loadPendingReviews(); loadAccuracyMetrics(); }
+            if (tabId === 'statistics') loadStatistics();
+            if (tabId === 'search') loadSearchStats();
+            if (tabId === 'agent') { loadAgentSessions(); loadAgentImages(); loadAgentLLMs(); }
+            if (tabId === 'cases-dashboard') loadCasesDashboard();
+            if (tabId === 'cases-list') loadCasesList();
+            if (tabId === 'cases-agents') loadAgentDefinitions();
+            if (tabId === 'cases-skills') loadSkillDefinitions();
+        }
+        document.querySelectorAll('.sidebar-item[data-tab]').forEach(item => {
+            item.addEventListener('click', () => switchTab(item.dataset.tab));
+        });
+        // Sidebar toggle
+        document.getElementById('sidebar-toggle').addEventListener('click', () => {
+            document.getElementById('app-sidebar').classList.toggle('collapsed');
         });
 
         // Upload tab switching
