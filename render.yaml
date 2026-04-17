@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: sitia-portal
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: VISION_LLM_DATA_DIR
+        value: /data
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+    disk:
+      name: sitia-data
+      mountPath: /data
+      sizeGB: 1

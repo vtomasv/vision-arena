@@ -28,8 +28,9 @@ COPY . .
 # Crear directorios para datos persistentes
 RUN mkdir -p /data /data/agent_outputs /data/reports
 
-# Establecer variable de entorno para el directorio de datos
+# Establecer variables de entorno
 ENV VISION_LLM_DATA_DIR=/data
+ENV PORT=8000
 
 # Exponer el puerto
 EXPOSE 8000
